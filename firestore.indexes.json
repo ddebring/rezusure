@@ -1,0 +1,10 @@
+{
+  "indexes": [
+    { "collectionGroup": "resumes", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "ownerId", "order": "ASCENDING" }, { "fieldPath": "uploadedAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "analyses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "ownerId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "analyses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "resumeId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "payments", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "ownerId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "webhookEvents", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "provider", "order": "ASCENDING" }, { "fieldPath": "receivedAt", "order": "DESCENDING" }] }
+  ],
+  "fieldOverrides": []
+}
