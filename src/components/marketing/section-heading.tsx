@@ -1,3 +1,11 @@
-export function SectionHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
-  return <div className="max-w-2xl"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{eyebrow}</p><h2 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">{title}</h2><p className="mt-4 text-base leading-7 text-slate-600">{description}</p></div>;
+import type { ReactNode } from "react";
+
+export function SectionHeading({ eyebrow, title, description }: { eyebrow: string; title: ReactNode; description: string }) {
+  return (
+    <div className="max-w-3xl">
+      <p className="eyebrow">{eyebrow}</p>
+      <h2 className="section-heading mt-3 text-[var(--foreground)]">{title}</h2>
+      <p className="mt-4 text-base leading-7 text-[var(--muted-foreground)] md:text-lg">{description}</p>
+    </div>
+  );
 }

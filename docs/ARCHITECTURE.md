@@ -22,7 +22,7 @@ src/
   config/                 # product catalog, plans, country catalog
   domain/                 # provider-agnostic business contracts
   lib/
-    ai/                   # OpenAI adapter + validated analysis schema
+    ai/                   # Gemini adapter + validated analysis schema
     auth/                 # trusted token verification
     billing/              # pricing resolution + provider interface
     country/              # country detection + context resolution
@@ -64,7 +64,7 @@ Provider-specific IDs, secrets, signatures, and webhook payloads stay in the ada
 
 ## 5. AI abstraction
 
-`AIResumeAnalyzer` is the application interface. `OpenAIResumeAnalyzer` is the first adapter. Model output must pass `ResumeAnalysisSchema` before persistence. The database stores the validated business object plus model/schema metadata, not an unbounded raw response.
+`AIResumeAnalyzer` is the application interface. `GeminiResumeAnalyzer` is the active adapter for resume scoring. Model output must pass `ResumeAnalysisSchema` before persistence. The database stores the validated business object plus model/schema metadata, not an unbounded raw response.
 
 The next milestone can add a different model/provider without changing the analysis page or Firestore model.
 

@@ -11,3 +11,8 @@ coverage/
 .turbo/
 .vercel/
 .netlify/
+
+# Generated build/cache files
+.artifacts/
+tsconfig.tsbuildinfo
+.next/

@@ -10,27 +10,24 @@ const feedback = z.object({
 
 export const ResumeAnalysisSchema = z.object({
   overallScore: score,
-  categoryScores: z.object({
-    ats: score,
-    content: score,
-    structure: score,
-    impact: score,
-    clarity: score,
-  }),
+  atsScore: score,
+  contentScore: score,
+  structureScore: score,
+  impactScore: score,
+  clarityScore: score,
   summary: z.string().max(3000),
   strengths: z.array(z.string().max(600)).max(20),
-  criticalIssues: z.array(z.string().max(600)).max(20),
+  detectedProblems: z.array(z.string().max(600)).max(20),
   recommendations: z.array(z.string().max(800)).max(30),
-  sections: z.object({
+  matchedKeywords: z.array(z.string().max(100)).max(100),
+  missingKeywords: z.array(z.string().max(100)).max(100),
+  jobRequirements: z.array(z.string().max(250)).max(50),
+  sectionFeedback: z.object({
     summary: feedback,
     experience: feedback,
     education: feedback,
     skills: feedback,
   }),
-  keywords: z.object({
-    present: z.array(z.string().max(100)).max(100),
-    missing: z.array(z.string().max(100)).max(100),
-  }),
-});
+}).passthrough();
 
 export type ResumeAnalysisSchemaOutput = z.infer<typeof ResumeAnalysisSchema>;

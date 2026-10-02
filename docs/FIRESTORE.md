@@ -46,7 +46,7 @@
   sections: object;
   keywords: { present: string[]; missing: string[] };
   createdAt: Timestamp;
-  model: { provider: "openai"; model: string; schemaVersion: string; analyzedAt: string };
+  model: { provider: "gemini"; model: string; schemaVersion: string; analyzedAt: string };
 }
 ```
 

@@ -12,7 +12,7 @@ External integrations are intentionally not wired as fake implementations. The n
 
 - **Next.js App Router**: UI, server components, and portable `app/api/**/route.ts` handlers.
 - **Domain layer** (`src/domain`): provider-agnostic business types.
-- **Infrastructure layer** (`src/lib`): Firebase, OpenAI, geolocation, validation, and billing adapters.
+- **Infrastructure layer** (`src/lib`): Firebase, Gemini, geolocation, validation, and billing adapters.
 - **Config layer** (`src/config`): product and pricing configuration.
 - **UI layer** (`src/components`): reusable primitives and application shells.
 
@@ -27,14 +27,25 @@ Business logic must not depend on Netlify APIs. Hosting-specific headers are han
 3. Start the app with `npm run dev`.
 4. Run `npm run typecheck` and `npm run lint` before committing.
 
-Firebase emulator support will be added with the authentication/data milestone.
+## Firebase setup
+
+1. Create a Firebase project in the Firebase Console.
+2. Open Authentication, then enable Email/Password and, if desired, Google sign-in.
+3. Create a Firestore database in production mode or test mode.
+4. In Project settings > General > Your apps, register a web app and copy the Firebase configuration values into the `NEXT_PUBLIC_*` variables in `.env.local`.
+5. In Project settings > Service accounts, generate a new private key. Use the JSON values to populate `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY`.
+6. Add the `/users/{uid}` access rules for authenticated ownership-only access in `firestore.rules`.
+7. Run `npm run dev`.
+8. Create a test account via `/signup`, then confirm that the `users/{uid}` document is created in Firestore.
+
+> Do not commit real Firebase secrets to source control. Keep them in `.env.local` or your hosting secret store.
 
 ## Planned implementation order
 
 1. Authentication + Firebase user bootstrap.
 2. Secure resume upload and storage metadata.
 3. Resume parsing and normalized resume model.
-4. OpenAI structured analysis + schema validation.
+4. Gemini structured analysis + schema validation.
 5. Dashboard/history and usage enforcement.
 6. Razorpay adapter + webhook idempotency.
 7. Paddle adapter + webhook idempotency.

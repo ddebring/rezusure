@@ -2,18 +2,20 @@ import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getStorage } from "firebase/storage";
 
-function getFirebaseApp() {
-  if (getApps().length) return getApp();
-  return initializeApp({
-    apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-    authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-    projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-    storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-    appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-  });
-}
+const firebaseConfig = {
+  apiKey: "AIzaSyBc6unSx5NB-v2oBke6qdNcEi1E6VB0BuY",
+  authDomain: "rezusure.firebaseapp.com",
+  projectId: "rezusure",
+  storageBucket: "rezusure.firebasestorage.app",
+  messagingSenderId: "32776108250",
+  appId: "1:32776108250:web:8660ab41ff8042ed7e0de3",
+  measurementId: "G-66Y8L44F4N",
+};
 
-export const firebaseApp = getFirebaseApp();
+const firebaseApp =
+  getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+
 export const firebaseAuth = getAuth(firebaseApp);
 export const firebaseStorage = getStorage(firebaseApp);
+
+export default firebaseApp;

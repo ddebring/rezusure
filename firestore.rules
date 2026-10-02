@@ -10,35 +10,60 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == userId;
     }
 
+    function profileUpdateAllowed(userId) {
+      return isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'provider', 'createdAt', 'updatedAt'])
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['freeAnalysesRemaining', 'paidCredits', 'totalAnalysesUsed', 'createdAt']);
+    }
+
     match /users/{userId} {
-      allow read, create, update: if isOwner(userId);
-      allow delete: if isOwner(userId);
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'provider', 'createdAt', 'updatedAt']);
+      allow update: if profileUpdateAllowed(userId);
+      allow delete: if false;
+
+      match /resumes/{resumeId} {
+        allow read, create, update: if isOwner(userId);
+        allow delete: if isOwner(userId);
+
+        match /analyses/{analysisId} {
+          allow read, create, update: if isOwner(userId);
+          allow delete: if isOwner(userId);
+        }
+      }
+
+      match /purchases/{purchaseId} {
+        allow read: if isOwner(userId);
+        allow write: if false;
+      }
+
+      match /credit-ledger/{ledgerEntryId} {
+        allow read: if isOwner(userId);
+        allow write: if false;
+      }
     }
 
     match /resumes/{resumeId} {
-      // Resume metadata is created/updated by trusted server code after upload validation.
-      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
-      allow write: if false;
+      allow read, write: if false;
     }
 
     match /analyses/{analysisId} {
-      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
-      allow write: if false;
+      allow read, write: if false;
     }
 
     match /subscriptions/{subscriptionId} {
-      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
-      allow write: if false;
-    }
-
-    match /payments/{paymentId} {
-      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
-      allow write: if false;
+      allow read, write: if false;
     }
 
     match /usage/{usageId} {
-      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
-      allow write: if false;
+      allow read, write: if false;
+    }
+
+    match /payments/{paymentId} {
+      allow read, write: if false;
     }
 
     match /webhookEvents/{eventId} {

@@ -3,7 +3,7 @@
 1. Firebase Authentication establishes the user identity; server routes verify ID tokens using Firebase Admin SDK.
 2. Firestore client rules allow users to read only their own user-owned documents. Privileged writes are server-only.
 3. Firebase Storage rules scope resume files to the owning UID and constrain MIME type + file size.
-4. OpenAI and payment secrets are server-only environment variables.
+4. Gemini and payment secrets are server-only environment variables.
 5. Client-submitted `ownerId`, plan amount, currency, provider, subscription status, usage counters, and payment status are never trusted.
 6. Display country may be overridden by the user. Checkout re-detects country server-side and ignores the display-country cookie for provider/currency/price decisions.
 7. Payment webhooks will be signature-verified and deduplicated through `webhookEvents` before changing subscriptions or payments.
