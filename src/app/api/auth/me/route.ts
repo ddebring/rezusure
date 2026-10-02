@@ -1,42 +1,106 @@
 import { NextResponse } from "next/server";
-import { AppError } from "@/domain/common/result";
-import { SESSION_COOKIE_NAME } from "@/lib/auth/types";
-import { verifyFirebaseSessionCookie } from "@/lib/auth/verify-id-token";
 
-function getSessionToken(request: Request) {
-  const cookieHeader = request.headers.get("cookie") ?? "";
-  const cookie = cookieHeader
-    .split(";")
-    .map((entry) => entry.trim())
-    .find((entry) => entry.startsWith(`${SESSION_COOKIE_NAME}=`));
+import { adminDb } from "@/lib/firebase/admin";
+import { verifyBearerToken } from "@/lib/auth/server";
 
-  if (!cookie) {
-    return null;
-  }
-
-  return decodeURIComponent(cookie.slice(`${SESSION_COOKIE_NAME}=`.length));
-}
-
-export async function GET(request: Request) {
+export async function GET(
+  request: Request,
+) {
   try {
-    const token = getSessionToken(request);
-    if (!token) {
-      return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    const decoded =
+      await verifyBearerToken(request);
+
+    const uid = decoded.uid;
+
+    const db = adminDb();
+
+    const userRef = db
+      .collection("users")
+      .doc(uid);
+
+    const snapshot =
+      await userRef.get();
+
+    if (!snapshot.exists) {
+      return NextResponse.json({
+        ok: true,
+        user: {
+          uid,
+          email:
+            decoded.email ?? null,
+          displayName:
+            decoded.name ?? null,
+          photoURL:
+            decoded.picture ?? null,
+        },
+      });
     }
 
-    const decoded = await verifyFirebaseSessionCookie(token);
+    const data = snapshot.data() ?? {};
+
     return NextResponse.json({
       ok: true,
       user: {
-        uid: decoded.uid,
-        email: decoded.email ?? null,
-        displayName: decoded.name ?? null,
-        photoURL: decoded.picture ?? null,
-        provider: decoded.firebase?.sign_in_provider ?? "password",
+        uid,
+
+        email:
+          data.email ??
+          decoded.email ??
+          null,
+
+        displayName:
+          data.displayName ??
+          decoded.name ??
+          null,
+
+        photoURL:
+          data.photoURL ??
+          decoded.picture ??
+          null,
+
+        ...data,
       },
     });
   } catch (error) {
-    const appError = error instanceof AppError ? error : new AppError("Unable to load session.", "SESSION_LOAD_FAILED", 500);
-    return NextResponse.json({ error: appError.message }, { status: appError.status });
+    console.error(
+      "[API /api/auth/me] error:",
+      error,
+    );
+
+    if (
+      error instanceof Error &&
+      "status" in error
+    ) {
+      const appError =
+        error as Error & {
+          status?: number;
+          code?: string;
+        };
+
+      return NextResponse.json(
+        {
+          error:
+            appError.message ??
+            "Authentication failed.",
+
+          code:
+            appError.code ??
+            "AUTH_FAILED",
+        },
+        {
+          status:
+            appError.status ??
+            401,
+        },
+      );
+    }
+
+    return NextResponse.json(
+      {
+        error:
+          "Unable to load authenticated user.",
+      },
+      { status: 401 },
+    );
   }
 }

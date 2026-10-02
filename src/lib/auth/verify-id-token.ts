@@ -1,11 +1,22 @@
 import type { DecodedIdToken } from "firebase-admin/auth";
+
 import { AppError } from "@/domain/common/result";
 import { adminAuth } from "@/lib/firebase/admin";
 
+/**
+ * Extract a Bearer token from an Authorization header.
+ *
+ * Expected:
+ * Authorization: Bearer <Firebase ID token>
+ */
 export function getBearerToken(request: Request): string | null {
   const authorization = request.headers.get("authorization");
 
-  if (!authorization?.startsWith("Bearer ")) {
+  if (!authorization) {
+    return null;
+  }
+
+  if (!authorization.toLowerCase().startsWith("bearer ")) {
     return null;
   }
 
@@ -14,79 +25,185 @@ export function getBearerToken(request: Request): string | null {
   return token || null;
 }
 
+/**
+ * Convert Firebase authentication errors into application errors.
+ */
 function mapAuthError(error: unknown): AppError {
   const firebaseError = error as {
     code?: string;
     message?: string;
   };
 
-  console.error("Firebase Admin auth verification error:", error);
-  console.error("Firebase Admin error code:", firebaseError?.code);
-  console.error("Firebase Admin error message:", firebaseError?.message);
+  const code = firebaseError?.code ?? "";
 
-  const isExpired =
-    firebaseError?.code === "auth/id-token-expired" ||
-    firebaseError?.code === "auth/session-cookie-expired" ||
-    /expired/i.test(firebaseError?.message ?? "");
+  if (
+    code.includes("auth/id-token-expired") ||
+    code.includes("auth/session-cookie-expired")
+  ) {
+    return new AppError(
+      "Your session has expired. Please sign in again.",
+      "AUTH_EXPIRED",
+      401,
+    );
+  }
+
+  if (
+    code.includes("auth/id-token-revoked") ||
+    code.includes("auth/session-cookie-revoked")
+  ) {
+    return new AppError(
+      "Your session is no longer valid. Please sign in again.",
+      "AUTH_REVOKED",
+      401,
+    );
+  }
+
+  if (
+    code.includes("auth/argument-error") ||
+    code.includes("auth/invalid-id-token") ||
+    code.includes("auth/invalid-session-cookie")
+  ) {
+    return new AppError(
+      "Invalid authentication credentials.",
+      "AUTH_INVALID",
+      401,
+    );
+  }
 
   return new AppError(
-    firebaseError?.message ?? "Invalid or expired authentication token.",
-    isExpired ? "AUTH_EXPIRED" : "AUTH_INVALID",
+    "Authentication failed.",
+    "AUTH_FAILED",
     401,
   );
 }
 
-export async function verifyFirebaseIdToken(token: string): Promise<DecodedIdToken> {
-  if (!token) {
-    throw new AppError("Authentication required.", "AUTH_REQUIRED", 401);
+/**
+ * Verify a Firebase ID token.
+ *
+ * Use this for:
+ * Authorization: Bearer <ID_TOKEN>
+ */
+export async function verifyFirebaseIdToken(
+  token: string,
+): Promise<DecodedIdToken> {
+  if (!token || !token.trim()) {
+    throw new AppError(
+      "Authentication required.",
+      "AUTH_REQUIRED",
+      401,
+    );
   }
 
   try {
-    return await adminAuth().verifyIdToken(token);
+    return await adminAuth().verifyIdToken(token, true);
   } catch (error) {
+    console.error("[auth] Firebase ID token verification failed:", error);
     throw mapAuthError(error);
   }
 }
 
-export async function verifyFirebaseSessionCookie(token: string): Promise<DecodedIdToken> {
-  if (!token) {
-    throw new AppError("Authentication required.", "AUTH_REQUIRED", 401);
+/**
+ * Verify a Firebase session cookie.
+ *
+ * Use this for:
+ * rezusure_session=<SESSION_COOKIE>
+ */
+export async function verifyFirebaseSessionCookie(
+  token: string,
+): Promise<DecodedIdToken> {
+  if (!token || !token.trim()) {
+    throw new AppError(
+      "Authentication required.",
+      "AUTH_REQUIRED",
+      401,
+    );
   }
 
   try {
     return await adminAuth().verifySessionCookie(token, true);
   } catch (error) {
+    console.error(
+      "[auth] Firebase session cookie verification failed:",
+      error,
+    );
+
     throw mapAuthError(error);
   }
 }
 
-export type TokenVerificationKind = "id-token" | "session-cookie";
-
-export async function verifyAuthToken(
+/**
+ * Generic ID-token verification alias.
+ */
+export async function verifyIdToken(
   token: string,
-  kind: TokenVerificationKind = "id-token",
 ): Promise<DecodedIdToken> {
-  if (kind === "session-cookie") {
-    return verifyFirebaseSessionCookie(token);
-  }
-
   return verifyFirebaseIdToken(token);
 }
 
-export async function verifyIdToken(token: string): Promise<DecodedIdToken> {
-  return verifyAuthToken(token, "id-token");
+/**
+ * Generic session-cookie verification alias.
+ */
+export async function verifySessionCookie(
+  token: string,
+): Promise<DecodedIdToken> {
+  return verifyFirebaseSessionCookie(token);
 }
 
-export async function verifySessionCookie(token: string): Promise<DecodedIdToken> {
-  return verifyAuthToken(token, "session-cookie");
-}
+/**
+ * Verify either:
+ *
+ * 1. Authorization: Bearer <Firebase ID token>
+ * 2. rezusure_session=<Firebase session cookie>
+ *
+ * This is the preferred helper for API routes.
+ */
+export async function verifyAuthToken(
+  request: Request,
+): Promise<DecodedIdToken> {
+  const bearerToken = getBearerToken(request);
 
-export async function requireAuthenticatedRequest(request: Request): Promise<DecodedIdToken> {
-  const token = getBearerToken(request);
-
-  if (!token) {
-    throw new AppError("Authentication required.", "AUTH_REQUIRED", 401);
+  if (bearerToken) {
+    return verifyFirebaseIdToken(bearerToken);
   }
 
-  return verifyFirebaseIdToken(token);
+  const cookieHeader = request.headers.get("cookie") ?? "";
+
+  const cookie = cookieHeader
+    .split(";")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith("rezusure_session="));
+
+  if (!cookie) {
+    throw new AppError(
+      "Authentication required.",
+      "AUTH_REQUIRED",
+      401,
+    );
+  }
+
+  const sessionToken = decodeURIComponent(
+    cookie.slice("rezusure_session=".length),
+  );
+
+  if (!sessionToken) {
+    throw new AppError(
+      "Authentication required.",
+      "AUTH_REQUIRED",
+      401,
+    );
+  }
+
+  return verifyFirebaseSessionCookie(sessionToken);
+}
+
+/**
+ * Require an authenticated API request.
+ *
+ * Kept as a separate helper so existing routes importing
+ * requireAuthenticatedRequest continue to work.
+ */
+export async function requireAuthenticatedRequest(
+  request: Request,
+): Promise<DecodedIdToken> {
+  return verifyAuthToken(request);
 }
