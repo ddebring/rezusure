@@ -22,11 +22,11 @@ const PRICES = {
   },
   pro: {
     INR: 499,
-    USD: 4.99,
+    USD: 5.99,
   },
   career: {
     INR: 699,
-    USD: 6.99,
+    USD: 7.99,
   },
 } as const;
 
