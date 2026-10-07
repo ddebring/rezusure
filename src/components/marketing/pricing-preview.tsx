@@ -17,16 +17,16 @@ const PRICES = {
     USD: 0,
   },
   starter: {
-    INR: 349,
+    INR: 299,
     USD: 3.99,
   },
   pro: {
-    INR: 599,
-    USD: 6.99,
+    INR: 499,
+    USD: 4.99,
   },
   career: {
-    INR: 849,
-    USD: 9.99,
+    INR: 699,
+    USD: 6.99,
   },
 } as const;
 
@@ -61,7 +61,7 @@ export function PricingPreview() {
     >
       <div className="mx-auto max-w-[1200px]">
 
-        {/* HEADER — ONLY ONE */}
+        {/* HEADER */}
         <div className="max-w-[850px]">
           <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-black/45">
             Simple plans
@@ -183,36 +183,29 @@ export function PricingPreview() {
                     ))}
                   </ul>
 
+                  {/* CTA */}
                   <div className="mt-auto pt-6">
-                    {plan.id === "pro" ? (
-                      <Button
-                        asChild
-                        variant="primary"
-                        className="!h-9 !w-full !rounded-full !border-0 !bg-[#c8ff21] !text-black !shadow-none hover:!bg-[#b9f000]"
+                    <Button
+                      asChild
+                      variant={isPopular ? "primary" : "outline"}
+                      className={
+                        isPopular
+                          ? "!h-9 !w-full !rounded-full !border-0 !bg-[#c8ff21] !text-black !shadow-none hover:!bg-[#b9f000]"
+                          : "!h-9 !w-full !rounded-full !border-black/10 !bg-white !text-black hover:!bg-black/[0.025]"
+                      }
+                    >
+                      <Link
+                        href={
+                          plan.id === "free"
+                            ? "/signup"
+                            : `/signup?plan=${plan.id}`
+                        }
                       >
-                        <Link href={`/pricing?plan=${plan.id}`}>
-                          Choose {plan.name}
-                        </Link>
-                      </Button>
-                    ) : (
-                      <Button
-                        asChild
-                        variant="outline"
-                        className="!h-9 !w-full !rounded-full !border-black/10 !bg-white !text-black hover:!bg-black/[0.025]"
-                      >
-                        <Link
-                          href={
-                            plan.id === "free"
-                              ? "/signup"
-                              : `/pricing?plan=${plan.id}`
-                          }
-                        >
-                          {plan.id === "free"
-                            ? "Check my resume"
-                            : `Choose ${plan.name}`}
-                        </Link>
-                      </Button>
-                    )}
+                        {plan.id === "free"
+                          ? "Check my resume"
+                          : `Choose ${plan.name}`}
+                      </Link>
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -229,7 +222,9 @@ export function PricingPreview() {
           <p>
             Prices shown in{" "}
             <span className="font-semibold text-black/55">
-              {isINR ? "Indian Rupees (INR)" : "US Dollars (USD)"}
+              {isINR
+                ? "Indian Rupees (INR)"
+                : "US Dollars (USD)"}
             </span>
             .
           </p>
