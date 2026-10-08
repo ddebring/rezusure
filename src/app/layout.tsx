@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
+import { AnalyticsInitializer } from "@/components/analytics/AnalyticsInitializer";
 import "./globals.css";
 
 const appUrl =
@@ -52,6 +53,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
+        <AnalyticsInitializer />
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
