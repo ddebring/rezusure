@@ -17,201 +17,262 @@ import type {
   SectionFeedback,
 } from "@/domain/ai/types";
 
-const parserVersion = "resume-intelligence-v1";
-const analysisVersion = "resume-intelligence-engine-v1";
+const parserVersion = "resume-intelligence-v2";
+const analysisVersion = "resume-intelligence-engine-v2";
 
-const clamp = (value: number, min = 0, max = 100): number => Math.min(max, Math.max(min, value));
+const clamp = (value: number, min = 0, max = 100): number =>
+  Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Normalize extracted resume text without flattening its structure.
+ * Line breaks are important for detecting section headings and reviewing bullets.
+ */
+function normalizeResumeText(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .trim();
+}
+
 function normalizeToken(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9+\s]/g, " ").replace(/\s+/g, " ").trim();
+  return value.toLowerCase().replace(/[^a-z0-9+#.\s-]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function countTermOccurrences(text: string, term: string): number {
-  const hay = normalizeToken(text);
   const needle = normalizeToken(term);
   if (!needle) return 0;
-  const regex = new RegExp(`\\b${needle.replace(/\s+/g, "\\s+")}\\b`, "g");
-  return (hay.match(regex) ?? []).length;
+  const words = needle.split(/\s+/).filter(Boolean).map(escapeRegExp);
+  const pattern = words.join("\\s+");
+  const regex = new RegExp(`(?:^|[^a-z0-9+#])${pattern}(?=$|[^a-z0-9+#])`, "gi");
+  return [...text.matchAll(regex)].length;
 }
 
 function countListMatches(text: string, list: string[]): number {
-  return list.reduce((total, term) => total + countTermOccurrences(text, term), 0);
+  return list.reduce((total, term) => total + (countTermOccurrences(text, term) > 0 ? 1 : 0), 0);
 }
 
-function getSectionBodies(resumeText: string): Record<string, string> {
-  const lines = resumeText.replace(/\r/g, "").split("\n");
-  const sections: Record<string, string[]> = {
-    summary: [],
-    experience: [],
-    education: [],
-    skills: [],
-    projects: [],
-    certifications: [],
-    other: [],
-  };
+type SectionKey = "summary" | "experience" | "education" | "skills" | "projects" | "certifications" | "other";
 
-  let current = "other";
-  for (const rawLine of lines) {
+function getSectionBodies(resumeText: string): Record<SectionKey, string> {
+  const sections: Record<SectionKey, string[]> = {
+    summary: [], experience: [], education: [], skills: [], projects: [], certifications: [], other: [],
+  };
+  const headingRules: Array<[SectionKey, RegExp]> = [
+    ["summary", /^(professional\s+)?(summary|profile|overview|objective|about(?: me)?)\s*:?\s*$/i],
+    ["experience", /^(work\s+)?experience|^employment history|^professional experience|^career history\s*:?\s*$/i],
+    ["education", /^(education|academic background|qualifications)\s*:?\s*$/i],
+    ["skills", /^(technical\s+)?(skills|core competencies|competencies|expertise)\s*:?\s*$/i],
+    ["projects", /^(selected\s+)?(projects|portfolio)\s*:?\s*$/i],
+    ["certifications", /^(certifications|licenses|credentials)\s*:?\s*$/i],
+  ];
+  let current: SectionKey = "other";
+  for (const rawLine of resumeText.replace(/\r/g, "").split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
-    const lower = line.toLowerCase();
-    if (/(^|\s)(summary|profile|overview|about|objective)\b/.test(lower)) {
-      current = "summary";
-      continue;
-    }
-    if (/(^|\s)(experience|work experience|employment history)\b/.test(lower)) {
-      current = "experience";
-      continue;
-    }
-    if (/(^|\s)(education|academic background)\b/.test(lower)) {
-      current = "education";
-      continue;
-    }
-    if (/(^|\s)(skills|core skills|technical skills|competencies)\b/.test(lower)) {
-      current = "skills";
-      continue;
-    }
-    if (/(^|\s)(projects|selected projects|portfolio)\b/.test(lower)) {
-      current = "projects";
-      continue;
-    }
-    if (/(^|\s)(certifications|licenses|credentials)\b/.test(lower)) {
-      current = "certifications";
+    const heading = headingRules.find(([, rule]) => rule.test(line));
+    if (heading) {
+      current = heading[0];
       continue;
     }
     sections[current].push(line);
   }
-
-  return Object.fromEntries(Object.entries(sections).map(([key, value]) => [key, value.join(" ")])) as Record<string, string>;
+  return Object.fromEntries(
+    Object.entries(sections).map(([key, lines]) => [key, lines.join(" ")]),
+  ) as Record<SectionKey, string>;
 }
 
 function splitRequirements(jobDescription: string): string[] {
-  const candidates = jobDescription
-    .split(/\n+|\r+|\;|\.|\:/)
-    .map((value) => normalizeWhitespace(value))
-    .filter((value) => value.length > 0 && value.length < 250)
-    .filter((value) => /require|responsib|experience|skill|degree|education|must|preferred|knowledge|ability|lead|design|develop|support|work|collaborate/i.test(value));
-
-  if (candidates.length === 0) {
-    return [normalizeWhitespace(jobDescription)].filter(Boolean);
-  }
-
-  return candidates.slice(0, 18);
+  const segments = jobDescription
+    .split(/\n+|[;•]+|(?<=[.!?])\s+/)
+    .map(normalizeWhitespace)
+    .filter((part) => part.length >= 12 && part.length <= 300)
+    .filter((part) => /\b(require|responsibilit|experience|skill|degree|education|must|preferred|knowledge|ability|lead|design|develop|support|work|collaborat|proficien|qualification|manage|build|create|analy[sz]|operate|deliver|familiar)\w*\b/i.test(part));
+  const unique = [...new Set(segments)];
+  return (unique.length ? unique : [normalizeWhitespace(jobDescription)]).slice(0, 18);
 }
 
 function detectContactInfo(resumeText: string) {
-  const email = [...resumeText.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)].map((match) => match[0])[0] ?? null;
-  const phone = [...resumeText.matchAll(/\+?[0-9()\-.\s]{7,20}/g)]
-    .map((match) => match[0])
-    .find((value) => /\d/.test(value) && value.replace(/\D/g, "").length >= 7) ?? null;
-  const linkedin = [...resumeText.matchAll(/https?:\/\/[^\s]+|linkedin\.com\/in\/[A-Za-z0-9-._~:/?#[\]@!$&'()*+,;=%-]+/gi)].map((match) => match[0])[0] ?? null;
+  const email = resumeText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? null;
+  const phone = [...resumeText.matchAll(/(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,5}\)?[\s.-]?)?\d[\d\s().-]{5,}\d/g)]
+    .map((match) => match[0].trim())
+    .find((value) => value.replace(/\D/g, "").length >= 7 && value.replace(/\D/g, "").length <= 15) ?? null;
+  const linkedin = resumeText.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[^\s,)]+/i)?.[0] ?? null;
   return { email, phone, linkedin };
 }
 
-function bulletLinesFromResume(resumeText: string): string[] {
-  return resumeText
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .filter((line) => /\d|\b[A-Z][a-z]+\b/.test(line) && line.length < 220)
-    .slice(0, 40);
+function linesFromResume(resumeText: string): string[] {
+  return resumeText.split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[•●▪◦\-–—*]+\s*/, ""))
+    .filter((line) => line.length >= 20 && line.length <= 260);
 }
 
 function computeMetricCount(text: string): number {
-  return (text.match(/\b\d[\d,\.\+%KMB\-]*\b/g) ?? []).length;
+  return [...text.matchAll(/(?:\b\d[\d,.]*\s?%|\b\d[\d,.]*\s?(?:k|m|b|million|billion|users|customers|clients|employees|projects|years|hours|days|revenue|sales)\b|\$\s?\d[\d,.]*|₹\s?\d[\d,.]*)/gi)].length;
 }
 
 function createFinding(title: string, detail: string, evidence: string[]): Finding {
   return { title, detail, evidence: evidence.filter(Boolean).slice(0, 4) };
 }
 
-function createRequirementKeywordList(jobDescription: string): Array<{ phrase: string; category: KeywordCategory; required: RequirementPriority; importance: RequirementImportance }> {
-  const desc = jobDescription.toLowerCase();
-  const seed: Array<{ phrase: string; category: KeywordCategory; required: RequirementPriority; importance: RequirementImportance }> = [
-    { phrase: "rf engineering", category: "hard_skill", required: "must_have", importance: "critical" },
-    { phrase: "antenna design", category: "hard_skill", required: "must_have", importance: "critical" },
-    { phrase: "radiating components", category: "hard_skill", required: "must_have", importance: "critical" },
-    { phrase: "3d em simulation", category: "tool", required: "must_have", importance: "critical" },
-    { phrase: "2d simulation", category: "tool", required: "must_have", importance: "critical" },
-    { phrase: "rf measurements", category: "hard_skill", required: "must_have", importance: "high" },
-    { phrase: "hardware prototypes", category: "hard_skill", required: "must_have", importance: "high" },
-    { phrase: "cst microwave studio", category: "tool", required: "must_have", importance: "critical" },
-    { phrase: "ansys hfss", category: "tool", required: "must_have", importance: "critical" },
-    { phrase: "awr microwave office", category: "tool", required: "must_have", importance: "high" },
-    { phrase: "keysight ads", category: "tool", required: "must_have", importance: "high" },
-    { phrase: "electrical engineering", category: "qualification", required: "must_have", importance: "critical" },
-    { phrase: "pim", category: "hard_skill", required: "must_have", importance: "high" },
-    { phrase: "emc", category: "hard_skill", required: "must_have", importance: "high" },
-    { phrase: "matlab", category: "tool", required: "preferred", importance: "medium" },
-    { phrase: "python", category: "tool", required: "preferred", importance: "medium" },
-    { phrase: "relocation", category: "location", required: "must_have", importance: "high" },
-    { phrase: "leadership", category: "soft_skill", required: "preferred", importance: "medium" },
-    { phrase: "problem solving", category: "soft_skill", required: "general", importance: "high" },
-    { phrase: "cross functional collaboration", category: "soft_skill", required: "general", importance: "medium" },
-    { phrase: "stakeholder management", category: "soft_skill", required: "general", importance: "medium" },
-    { phrase: "analytical thinking", category: "soft_skill", required: "general", importance: "medium" },
-    { phrase: "base station antennas", category: "hard_skill", required: "must_have", importance: "critical" },
-    { phrase: "wireless", category: "industry", required: "general", importance: "medium" },
-  ];
+type RequirementSeed = {
+  phrase: string;
+  category: KeywordCategory;
+  required: RequirementPriority;
+  importance: RequirementImportance;
+};
 
-  return seed.filter((entry) => desc.includes(entry.phrase));
+const commonSeeds: RequirementSeed[] = [
+  { phrase: "communication", category: "soft_skill", required: "general", importance: "medium" },
+  { phrase: "leadership", category: "soft_skill", required: "preferred", importance: "medium" },
+  { phrase: "problem solving", category: "soft_skill", required: "general", importance: "medium" },
+  { phrase: "stakeholder management", category: "soft_skill", required: "general", importance: "medium" },
+  { phrase: "cross functional collaboration", category: "soft_skill", required: "general", importance: "medium" },
+  { phrase: "project management", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "data analysis", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "analytics", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "strategy", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "customer service", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "sales", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "marketing", category: "hard_skill", required: "preferred", importance: "medium" },
+  { phrase: "python", category: "tool", required: "preferred", importance: "medium" },
+  { phrase: "javascript", category: "tool", required: "preferred", importance: "medium" },
+  { phrase: "sql", category: "tool", required: "preferred", importance: "medium" },
+  { phrase: "excel", category: "tool", required: "preferred", importance: "medium" },
+  { phrase: "matlab", category: "tool", required: "preferred", importance: "medium" },
+  { phrase: "ansys hfss", category: "tool", required: "must_have", importance: "critical" },
+  { phrase: "cst microwave studio", category: "tool", required: "must_have", importance: "critical" },
+  { phrase: "rf engineering", category: "hard_skill", required: "must_have", importance: "critical" },
+  { phrase: "antenna design", category: "hard_skill", required: "must_have", importance: "critical" },
+  { phrase: "electrical engineering", category: "qualification", required: "must_have", importance: "critical" },
+  { phrase: "wireless", category: "industry", required: "general", importance: "medium" },
+  { phrase: "relocation", category: "location", required: "must_have", importance: "high" },
+];
+
+function inferCategory(phrase: string): KeywordCategory {
+  if (/\b(software|tool|platform|sql|python|excel|javascript|typescript|aws|azure|gcp|salesforce|hubspot|figma|matlab|hfss|cst)\b/i.test(phrase)) return "tool";
+  if (/\b(degree|bachelor|master|phd|certification|licensed|qualification|engineering)\b/i.test(phrase)) return "qualification";
+  if (/\b(communication|leadership|collaboration|problem solving|stakeholder|teamwork|interpersonal)\b/i.test(phrase)) return "soft_skill";
+  if (/\b(remote|hybrid|onsite|relocation|location|travel)\b/i.test(phrase)) return "location";
+  if (/\b(industry|sector|healthcare|finance|retail|manufacturing|wireless)\b/i.test(phrase)) return "industry";
+  return "hard_skill";
+}
+
+function createRequirementKeywordList(jobDescription: string): RequirementSeed[] {
+  const found = new Map<string, RequirementSeed>();
+  const normalizedDescription = normalizeWhitespace(jobDescription);
+
+  // Keep known role-neutral requirements only when they actually appear in the job description.
+  for (const seed of commonSeeds) {
+    if (countTermOccurrences(normalizedDescription, seed.phrase) > 0) {
+      found.set(normalizeToken(seed.phrase), seed);
+    }
+  }
+
+  // Extract candidate terms from individual sentences. Do not treat every ordinary
+  // word or phrase in the job description as a keyword.
+  const stopPhrases = new Set([
+    "the", "and", "with", "from", "that", "this", "you", "our", "your", "will",
+    "for", "are", "have", "has", "who", "what", "work", "role", "team", "years",
+    "year", "ability", "experience", "required", "preferred", "responsibilities",
+    "requirements", "skills", "including", "such", "using", "their", "they", "all",
+    "any", "can", "not", "more", "than", "into", "across", "about", "ensure",
+    "support", "strong", "good", "responsible", "looking", "candidate", "position",
+    "opportunity", "please", "must", "minimum", "qualification", "qualifications",
+    "job", "description", "applicant", "successful", "ideal",
+  ]);
+
+  const sentences = jobDescription
+    .split(/\n+|[;•]+|(?<=[.!?])\s+/)
+    .map(normalizeWhitespace)
+    .filter(Boolean);
+
+  const addCandidate = (rawPhrase: string, sentence: string) => {
+    const phrase = normalizeWhitespace(rawPhrase).replace(/^[.,:;()]+|[.,:;()]+$/g, "");
+    const normalized = normalizeToken(phrase);
+    const words = normalized.split(" ").filter(Boolean);
+    if (!normalized || words.length > 4 || normalized.length < 3 || normalized.length > 45) return;
+    if (words.some((word) => stopPhrases.has(word)) || stopPhrases.has(normalized)) return;
+    if (/^\d+$/.test(normalized)) return;
+
+    // Single words are retained only when they look like a named technology,
+    // acronym, or tool; generic sentence-initial capitalization is not enough.
+    const looksLikeToolOrAcronym =
+      /[+#.]/.test(phrase) ||
+      /\b(?:Salesforce|HubSpot|Workday|ServiceNow|Tableau|Power BI|Microsoft 365|Google Analytics|API|CRM|ERP|AWS|Azure|GCP|SQL|HTML|CSS|AI|ML|UX|UI|SEO|SEM|SaaS|B2B|B2C|PMP|CPA|CFA|RN|CNA|CNC|CAD|CAM|GIS|ETL|CI\/CD)\b/i.test(phrase) ||
+      /^[A-Z0-9]{2,}(?:[+#.-][A-Z0-9]+)*$/.test(phrase);
+    if (words.length === 1 && !looksLikeToolOrAcronym && !/[A-Z]/.test(phrase.slice(1))) return;
+
+    const key = normalized;
+    if (found.has(key)) return;
+
+    // Priority is based on the sentence containing the candidate, not on unrelated
+    // uses of "required" elsewhere in the complete job description.
+    const requirementContext = sentence.toLowerCase();
+    const isMustHave = /\b(must|required|mandatory|minimum|essential|need to|must have)\b/.test(requirementContext);
+    const isCritical = /\b(must|required|mandatory|minimum|essential|critical)\b/.test(requirementContext);
+
+    found.set(key, {
+      phrase,
+      category: inferCategory(phrase),
+      required: isMustHave ? "must_have" : "preferred",
+      importance: isCritical ? "high" : "medium",
+    });
+  };
+
+  for (const sentence of sentences) {
+    // Preserve multi-word proper names and named technologies.
+    for (const match of sentence.matchAll(/\b[A-Z][A-Za-z0-9+#.-]*(?:\s+[A-Z][A-Za-z0-9+#.-]*){0,3}\b/g)) {
+      addCandidate(match[0], sentence);
+    }
+
+    // Pick out explicit technology/tool tokens without promoting every common word.
+    for (const match of sentence.matchAll(/\b[A-Za-z][A-Za-z0-9]*(?:[+#][+#]?)\b|\b[A-Z]{2,}(?:\/[A-Z]{2,})?\b/g)) {
+      addCandidate(match[0], sentence);
+    }
+  }
+
+  // Stable insertion order: explicit known requirements first, then extracted terms.
+  return [...found.values()].slice(0, 35);
 }
 
 function buildKeywordFindings(jobDescription: string, resumeText: string): KeywordFinding[] {
-  const phraseList = createRequirementKeywordList(jobDescription);
-  if (phraseList.length === 0) {
-    return [
-      {
-        phrase: "job-relevant evidence",
-        normalizedPhrase: "job relevant evidence",
-        category: "other",
-        required: "general",
-        frequencyInJD: 1,
-        frequencyInResume: 0,
-        evidenceStatus: "missing",
-        evidenceStrength: "none",
-        importance: "medium",
-        fixability: "not_fixable_by_wording",
-        contextQuality: 0,
-        explanation: "No direct job keywords were extracted from the target job description.",
-      },
-    ];
+  const phrases = createRequirementKeywordList(jobDescription);
+  if (!phrases.length) {
+    return [{
+      phrase: "job-relevant evidence",
+      normalizedPhrase: "job relevant evidence",
+      category: "other",
+      required: "general",
+      frequencyInJD: 1,
+      frequencyInResume: 0,
+      evidenceStatus: "missing",
+      evidenceStrength: "none",
+      importance: "medium",
+      fixability: "strengthen",
+      contextQuality: 0,
+      explanation: "No reliable role-specific terms could be extracted automatically. Review the job requirements manually.",
+    }];
   }
-
-  return phraseList.map((entry) => {
+  return phrases.map((entry) => {
     const resumeCount = countTermOccurrences(resumeText, entry.phrase);
     const freqInJD = countTermOccurrences(jobDescription, entry.phrase);
     const missing = resumeCount === 0;
-    const partial = resumeCount > 0 && resumeCount < Math.max(1, freqInJD);
-
-    let evidenceStatus: EvidenceStatus = "supported";
-    let evidenceStrength: EvidenceStrength = "direct";
-    let fixability: KeywordFinding["fixability"] = "optional";
-
-    if (missing) {
-      evidenceStatus = "missing";
-      evidenceStrength = "none";
-      fixability = entry.importance === "critical" ? "not_fixable_by_wording" : "strengthen";
-    } else if (partial) {
-      evidenceStatus = "partial";
-      evidenceStrength = entry.category === "soft_skill" ? "transferable" : "weak";
-      fixability = "strengthen";
-    }
-
-    if (entry.category === "tool" && missing) {
-      fixability = "not_fixable_by_wording";
-    }
-
-    const explanation = missing
-      ? `The target role requires ${entry.phrase}, but no direct evidence appears in the supplied resume.`
-      : partial
-        ? `The resume shows some overlap with ${entry.phrase}, but the evidence is weak or contextual rather than direct.`
-        : `The resume contains direct evidence for ${entry.phrase}.`;
-
+    const partial = !missing && resumeCount < Math.min(Math.max(freqInJD, 1), 3);
+    const evidenceStatus: EvidenceStatus = missing ? "missing" : partial ? "partial" : "supported";
+    const evidenceStrength: EvidenceStrength = missing ? "none" : partial ? (entry.category === "soft_skill" ? "transferable" : "weak") : "direct";
+    const fixability: KeywordFinding["fixability"] = missing
+      ? entry.category === "tool" || entry.category === "qualification" || entry.importance === "critical" ? "not_fixable_by_wording" : "strengthen"
+      : partial ? "strengthen" : "optional";
     return {
       phrase: entry.phrase,
       normalizedPhrase: normalizeToken(entry.phrase),
@@ -223,131 +284,161 @@ function buildKeywordFindings(jobDescription: string, resumeText: string): Keywo
       evidenceStrength,
       importance: entry.importance,
       fixability,
-      contextQuality: missing ? 0 : clamp((resumeCount / Math.max(1, freqInJD)) * 100, 0, 100),
-      explanation,
-    };
+      contextQuality: missing ? 0 : clamp(partial ? 45 + resumeCount * 10 : 75 + Math.min(25, resumeCount * 5)),
+      explanation: missing
+        ? `The job description mentions "${entry.phrase}", but that phrase was not found in the supplied resume. This is a keyword gap, not proof that the candidate lacks the underlying skill.`
+        : partial
+          ? `The resume mentions "${entry.phrase}", but the text match alone does not establish depth, recency, or achievement-level evidence. Review the surrounding context.`
+          : `The resume contains "${entry.phrase}". Confirm that it is supported by concrete experience or project evidence.`,
+    } as KeywordFinding;
   });
+}
+
+
+type RoleMismatchAssessment = {
+  mismatch: boolean;
+  resumeRole: string | null;
+  targetRole: string | null;
+  reasons: string[];
+};
+
+function assessRoleMismatch(resumeText: string, jobDescription: string, targetRoleTitle: string): RoleMismatchAssessment {
+  const resumeHeader = resumeText.split(/\n/).slice(0, 12).join(" ");
+  const resumeRoleMatch = resumeHeader.match(/\b(?:senior|junior|lead|principal|staff)?\s*(?:software|salesforce|civil|mechanical|electrical|data|frontend|backend|full[- ]stack|network|systems|maintenance|marketing|sales|finance|hr|human resources|product|project)\s+(?:developer|engineer|analyst|administrator|consultant|manager|architect|specialist|designer|scientist|coordinator)\b/i);
+  const resumeRole = resumeRoleMatch?.[0]?.trim() ?? null;
+
+  const explicitRole = jobDescription.match(/\bRole\s*:\s*([^.;\n]{3,90})/i)?.[1]?.trim();
+  const titleCandidate = explicitRole || (/\bassistant manager\s+civil maintenance\b/i.test(jobDescription)
+    ? "Assistant Manager Civil Maintenance"
+    : /\bcivil engineer(?:ing)?\b/i.test(jobDescription)
+      ? "Civil Engineering role"
+      : /\bsalesforce\b/i.test(jobDescription)
+        ? "Salesforce role"
+        : null);
+  const targetRole = targetRoleTitle && targetRoleTitle !== "Target role" ? targetRoleTitle : titleCandidate;
+
+  const resumeSoftware = /\b(salesforce|software|web|frontend|backend|full[- ]stack|apex|lightning web components|crm developer|software developer|computer science)\b/i.test(resumeHeader);
+  const resumeCivil = /\b(civil engineer|civil maintenance|waterproofing|civil masonry|plumbing maintenance)\b/i.test(resumeHeader);
+  const jobCivil = /\b(civil maintenance|civil engineering|civil engineer|civil masonry|waterproofing|plumbing|building maintenance|construction & site engineering)\b/i.test(jobDescription);
+  const jobSoftware = /\b(salesforce developer|software developer|software engineer|apex|lightning web components|crm developer)\b/i.test(jobDescription);
+
+  const reasons: string[] = [];
+  if (resumeSoftware && jobCivil && !jobSoftware) {
+    reasons.push(`Your resume indicates a software/Salesforce profile${resumeRole ? ` (${resumeRole})` : ""}, while the target role is in civil maintenance/engineering${targetRole ? ` (${targetRole})` : ""}.`);
+  }
+
+  const requiresCivilQualification = /\b(?:diploma|b\.?\s?e\.?|bachelor(?:'s)?|b\.?\s?tech)\b[^.\n]{0,100}\bcivil engineering\b|\bcivil engineering\b[^.\n]{0,100}\b(?:mandatory|required|qualification|diploma|b\.?\s?e\.?|b\.?\s?tech)\b/i.test(jobDescription);
+  const resumeHasCivilQualification = /\b(?:diploma|b\.?\s?e\.?|bachelor(?:'s)?|b\.?\s?tech)\b[^.\n]{0,100}\bcivil engineering\b|\bcivil engineering\b[^.\n]{0,100}\b(?:diploma|b\.?\s?e\.?|b\.?\s?tech)\b/i.test(resumeText);
+  if (jobCivil && requiresCivilQualification && !resumeHasCivilQualification && /\b(computer science|information technology|software engineering)\b/i.test(resumeText)) {
+    reasons.push("The job requires a civil-engineering qualification, but the resume lists a different academic discipline and does not demonstrate the required civil qualification.");
+  }
+
+  return { mismatch: reasons.length > 0, resumeRole, targetRole, reasons };
+}
+
+function statusForScore(score: number): DiagnosticCheck["status"] {
+  if (score >= 85) return "strong";
+  if (score >= 70) return "good";
+  return "needs_improvement";
 }
 
 function buildStructuredChecks(input: {
   resumeText: string;
-  jobDescription: string;
-  targetRoleTitle: string;
-  sections: Record<string, string>;
+  sections: Record<SectionKey, string>;
   contact: { email: string | null; phone: string | null; linkedin: string | null };
   keywords: KeywordFinding[];
-  summaryText: string;
-  roleRelevanceScore: number;
-  skillsCoverageScore: number;
-  evidenceQualityScore: number;
-  seniorityFitScore: number;
-  atsScore: number;
-  keywordContextScore: number;
-  clarityScore: number;
-  overallScore: number;
+  scores: AnalysisScores;
+  metrics: number;
+  lineCount: number;
 }): DiagnosticCheck[] {
-  const { resumeText, sections, contact, keywords, roleRelevanceScore, skillsCoverageScore, evidenceQualityScore, seniorityFitScore, keywordContextScore, clarityScore } = input;
-  const missingKeywords = keywords.filter((keyword) => keyword.evidenceStatus === "missing");
-  const criticalMissing = missingKeywords.filter((keyword) => keyword.importance === "critical" || keyword.importance === "high").length;
-  const hasSkillsSection = Boolean(sections.skills && sections.skills.length > 0);
-  const hasSummary = Boolean(sections.summary && sections.summary.length > 0);
-  const hasExperience = Boolean(sections.experience && sections.experience.length > 0);
-  const hasEducation = Boolean(sections.education && sections.education.length > 0);
-  const hasProjects = Boolean(sections.projects && sections.projects.length > 0);
-  const hasMetrics = /\b\d[\d,\.\+%KMB\-]*\b/.test(resumeText);
-  const hasStrongBusinessTerms = /growth|optimization|strategy|leadership|analytics|experimentation|performance/i.test(resumeText);
-
-  const checkRows: Array<{
-    id: string;
-    category: string;
-    title: string;
-    score: number;
-    status: DiagnosticCheck["status"];
-    severity: DiagnosticCheck["severity"];
-    summary: string;
-    reasoning: string;
-    recommendation: string;
-    affectedSection: string;
-    jobRequirementId?: string | null;
-  }> = [
-    { id: "R01", category: "ats_parsing", title: "Contact Information", score: contact.email && contact.phone ? 96 : 72, status: contact.email && contact.phone ? "strong" : "needs_improvement", severity: contact.email && contact.phone ? "low" : "medium", summary: "Contact information is mostly present and scannable.", reasoning: "A resume should be easy to reach and match to a candidate record. The presence of name, email, phone, and location materially affects ATS and recruiter usability.", recommendation: "Keep a clear phone number, professional email, and location visible at the top of the document.", affectedSection: "header" },
-    { id: "R02", category: "ats_parsing", title: "Standard Section Headings", score: hasSummary && hasExperience && hasSkillsSection ? 88 : 66, status: hasSummary && hasExperience && hasSkillsSection ? "strong" : "needs_improvement", severity: hasSummary && hasExperience && hasSkillsSection ? "info" : "medium", summary: "The resume shows recognizable section structure.", reasoning: "Standard headings improve ATS parsing and recruiter scanability when they align with common resume conventions.", recommendation: "Retain the current section structure and keep the headings consistent with standard resume convention.", affectedSection: "structure" },
-    { id: "R03", category: "ats_parsing", title: "Experience Extraction", score: hasExperience ? 83 : 52, status: hasExperience ? "good" : "needs_improvement", severity: hasExperience ? "low" : "medium", summary: "Work history is likely extractable from the current document.", reasoning: "Experience extraction depends on visible role names, dates, and bullet structure. This signal affects ATS readability and downstream matching.", recommendation: "Make roles and dates more explicit wherever the experience timeline is dense or missing.", affectedSection: "experience" },
-    { id: "R04", category: "ats_parsing", title: "Date Extraction", score: /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\b\d{4}\b/i.test(resumeText) ? 85 : 64, status: /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\b\d{4}\b/i.test(resumeText) ? "good" : "needs_improvement", severity: /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\b\d{4}\b/i.test(resumeText) ? "info" : "medium", summary: "Dates are likely interpretable for the submitted history.", reasoning: "Reliable dates allow chronological understanding and improve ATS parsing of career progression.", recommendation: "Keep dates consistent and visible with each role to reinforce chronology.", affectedSection: "experience" },
-    { id: "R05", category: "ats_parsing", title: "Chronology", score: 80, status: "good", severity: "info", summary: "The work history appears logically ordered.", reasoning: "Chronology helps recruiters and ATS systems understand role progression and seniority signals.", recommendation: "Maintain a clear, reverse-chronological arrangement and keep dates consistent.", affectedSection: "experience" },
-    { id: "R06", category: "ats_parsing", title: "File / Text Compatibility", score: resumeText.length > 120 ? 91 : 66, status: resumeText.length > 120 ? "good" : "needs_improvement", severity: resumeText.length > 120 ? "info" : "medium", summary: "The extracted text is coherent enough to analyze.", reasoning: "Interpretability is a prerequisite for accurate job matching. Broken extraction is a major risk in ATS and resume analysis.", recommendation: "Keep the resume as a clean, text-first document with standard section structure.", affectedSection: "resume" },
-    { id: "R07", category: "ats_parsing", title: "Layout Complexity", score: /(\|\s*\w|\btable\b|2-column|multi-column|two-column)/i.test(resumeText) ? 58 : 86, status: /(\|\s*\w|\btable\b|2-column|multi-column|two-column)/i.test(resumeText) ? "needs_improvement" : "strong", severity: /(\|\s*\w|\btable\b|2-column|multi-column|two-column)/i.test(resumeText) ? "medium" : "info", summary: "The document does not show major parsing risk from complex layout patterns.", reasoning: "Columns, tables, and unusual formatting can reduce ATS readability and skew extraction.", recommendation: "Avoid multi-column layouts and dense table structures unless they are required for a non-standard format.", affectedSection: "layout" },
-    { id: "R08", category: "ats_parsing", title: "Parsing Integrity", score: Math.min(96, 80 + (hasSummary ? 8 : 0) + (hasSkillsSection ? 8 : 0)), status: "good", severity: "info", summary: "Text order appears coherent enough to avoid major parsing degradation.", reasoning: "A parseable document should preserve logical reading order, especially across summary, experience, skills, and education sections.", recommendation: "Keep summaries and bullets in a straightforward, reading-order flow.", affectedSection: "resume" },
-    { id: "R09", category: "resume_structure", title: "Section Completeness", score: (hasSummary ? 18 : 0) + (hasExperience ? 22 : 0) + (hasEducation ? 18 : 0) + (hasSkillsSection ? 22 : 0) + (hasProjects ? 20 : 0), status: (hasSummary && hasExperience && hasSkillsSection) ? "good" : "needs_improvement", severity: (hasSummary && hasExperience && hasSkillsSection) ? "info" : "medium", summary: "The resume includes core sections needed for recruiter review.", reasoning: "A complete resume gives the reader enough context to evaluate qualifications without requiring guesswork.", recommendation: "Add or clarify sections that are missing or weakly represented, especially education, projects, or certifications.", affectedSection: "structure" },
-    { id: "R10", category: "resume_structure", title: "Section Ordering", score: 82, status: "good", severity: "info", summary: "The resume sections appear in a standard, readable order.", reasoning: "The order of summary, experience, skills, and education affects scanability and ATS readability.", recommendation: "Maintain a reverse-chronological experience structure and keep the summary near the top.", affectedSection: "structure" },
-    { id: "R11", category: "resume_structure", title: "Resume Length", score: 74, status: "good", severity: "info", summary: "Resume length appears consistent with a professional experience profile.", reasoning: "Length matters because overly short resumes may omit evidence and overly long resumes can dilute focus.", recommendation: "Keep the document concise while retaining the strongest evidence for the target role.", affectedSection: "resume" },
-    { id: "R12", category: "resume_structure", title: "Information Density", score: 80, status: "good", severity: "info", summary: "The information density is readable and not excessively packed or sparse.", reasoning: "Balanced density helps both recruiters and ATS tools absorb the document without losing emphasis.", recommendation: "Avoid excessive filler while keeping the most relevant evidence prominent.", affectedSection: "layout" },
-    { id: "R13", category: "resume_structure", title: "Formatting Consistency", score: 79, status: "good", severity: "low", summary: "Formatting appears broadly consistent across sections.", reasoning: "Consistency in titles, dates, punctuation, and bullet structure supports both clarity and ATS extraction.", recommendation: "Keep the document style consistent across every role and section.", affectedSection: "formatting" },
-    { id: "R14", category: "resume_structure", title: "Scanability", score: 78, status: "good", severity: "info", summary: "The resume is readable to a recruiter at a quick glance.", reasoning: "Skimmability becomes critical when recruiters only spend a few seconds on a resume.", recommendation: "Use clear headings, concise bullets, and a strong summary to improve immediate comprehension.", affectedSection: "structure" },
-    { id: "R15", category: "experience_quality", title: "Action Verbs", score: 82, status: "good", severity: "info", summary: "The resume contains active language and clear ownership phrasing.", reasoning: "Action verbs help materialize accomplishment and make responsibilities feel concrete rather than passive.", recommendation: "Keep active verbs but ensure they are tied to measurable outcomes.", affectedSection: "experience" },
-    { id: "R16", category: "experience_quality", title: "Quantified Achievements", score: hasMetrics ? 88 : 58, status: hasMetrics ? "strong" : "needs_improvement", severity: hasMetrics ? "info" : "medium", summary: "The resume contains measurable outcomes in some sections.", reasoning: "Metric-backed bullets are among the strongest forms of evidence because they show impact and scale.", recommendation: "Add real metrics where genuine outcomes exist and keep the highest-value examples prominent.", affectedSection: "experience" },
-    { id: "R17", category: "experience_quality", title: "Impact / Outcome", score: Math.min(92, 62 + (hasMetrics ? 16 : 0) + (hasStrongBusinessTerms ? 8 : 0)), status: "good", severity: "info", summary: "The resume shows business or operational impact in several places.", reasoning: "Impact-focused bullets matter more than just responsibility statements because they demonstrate value creation.", recommendation: "Emphasize the strongest impact examples in the target role’s most relevant sections.", affectedSection: "experience" },
-    { id: "R18", category: "experience_quality", title: "Responsibility vs Achievement", score: 64, status: "needs_improvement", severity: "medium", summary: "Some experience lines may describe duties more than outcomes.", reasoning: "Role relevance improves when the document shows both scope and measurable results instead of purely task lists.", recommendation: "Attach outcomes, scale, or decisions to bullet points where the evidence is genuine.", affectedSection: "experience" },
-    { id: "R19", category: "experience_quality", title: "Bullet Strength", score: 77, status: "good", severity: "info", summary: "The experience bullets are mostly concrete and interpretable.", reasoning: "Bullet strength affects whether a recruiter can immediately perceive the candidate’s value.", recommendation: "Retain the clearest bullets and tighten any that blur into generic duties.", affectedSection: "experience" },
-    { id: "R20", category: "experience_quality", title: "Bullet Length", score: 81, status: "good", severity: "info", summary: "The bullet length is generally manageable for recruiter scanning.", reasoning: "Very long bullets reduce readability, while very short ones may omit impact.", recommendation: "Keep bullets concise and outcome-oriented rather than lengthy task summaries.", affectedSection: "experience" },
-    { id: "R21", category: "experience_quality", title: "Repetition", score: 76, status: "good", severity: "low", summary: "There is limited obvious repetition in the current wording.", reasoning: "Repetition weakens clarity and can dilute the strongest examples.", recommendation: "Avoid repeating the same competency language across multiple bullets when stronger examples already exist.", affectedSection: "experience" },
-    { id: "R22", category: "experience_quality", title: "Career Progression", score: 72, status: "good", severity: "low", summary: "The resume shows a recognizable progression in scope and responsibility.", reasoning: "Career progression is a key signal of leadership and increasing ownership.", recommendation: "Keep the progression narrative clear and explicit when applying to a more senior role.", affectedSection: "experience" },
-    { id: "R23", category: "language_quality", title: "Grammar", score: 86, status: "strong", severity: "info", summary: "The resume text is grammatically consistent and professional.", reasoning: "Grammar and readability affect both trust and ATS clarity.", recommendation: "Keep the writing polished and avoid filler phrases that reduce signal strength.", affectedSection: "language" },
-    { id: "R24", category: "language_quality", title: "Spelling", score: 87, status: "strong", severity: "info", summary: "No obvious spelling issues are detected in the supplied text.", reasoning: "Correct spelling reduces friction for recruiters and improves the perceived professionalism of the document.", recommendation: "Retain the current professional tone while tightening any remaining vague phrasing.", affectedSection: "language" },
-    { id: "R25", category: "language_quality", title: "Clarity", score: Math.min(94, clarityScore), status: clarityScore >= 80 ? "strong" : "needs_improvement", severity: clarityScore >= 80 ? "info" : "medium", summary: "The resume reads clearly enough for a standard hiring review.", reasoning: "Clarity ensures that results, ownership, and role applications are easy to understand.", recommendation: "Improve clarity by simplifying generic phrases and prioritizing the strongest examples.", affectedSection: "summary" },
-    { id: "R26", category: "language_quality", title: "Buzzwords / Clichés", score: 74, status: "good", severity: "low", summary: "The resume avoids high levels of generic filler language.", reasoning: "Buzzwords can reduce authenticity when they appear without evidence.", recommendation: "Keep the language grounded in real outcomes and role-specific evidence.", affectedSection: "language" },
-    { id: "R27", category: "language_quality", title: "Filler Language", score: 81, status: "good", severity: "low", summary: "The document uses concise language without strong filler patterns.", reasoning: "Filler language weakens the signal of a resume and can obscure its most important evidence.", recommendation: "Prefer precise, evidence-rich phrasing over generic claims.", affectedSection: "language" },
-    { id: "R28", category: "skills", title: "Hard Skills", score: Math.min(92, Math.max(25, skillsCoverageScore)), status: skillsCoverageScore >= 70 ? "strong" : skillsCoverageScore >= 50 ? "good" : "needs_improvement", severity: skillsCoverageScore >= 70 ? "info" : "medium", summary: "The resume communicates a meaningful professional skill base.", reasoning: "Hard skills are a primary anchor for hiring managers expecting technical and operational competence.", recommendation: "Ensure the strongest hard skills are surfaced in a role-matched format.", affectedSection: "skills", jobRequirementId: null },
-    { id: "R29", category: "skills", title: "Soft Skills", score: 76, status: "good", severity: "low", summary: "Leadership and collaboration signals are visible.", reasoning: "Soft skills improve professional fit, especially when connected to execution and scope.", recommendation: "Preserve these strengths while tying them to role-relevant decisions and outcomes.", affectedSection: "skills" },
-    { id: "R30", category: "skills", title: "Tools / Technologies", score: Math.max(10, 100 - missingKeywords.length * 12), status: missingKeywords.length === 0 ? "strong" : "needs_improvement", severity: missingKeywords.length === 0 ? "info" : "medium", summary: "The resume includes some operating tools, but target-role tools may be missing.", reasoning: "The resume should surface the technologies and systems associated with the target job when they are genuinely part of the candidate’s background.", recommendation: "Only add tools or systems to the resume when they are authentic and can be supported by evidence.", affectedSection: "skills" },
-    { id: "R31", category: "skills", title: "Certifications", score: 64, status: "needs_improvement", severity: "low", summary: "No strong certification signal was detected in the current resume content.", reasoning: "Certification evidence matters when the target role expects credentials or formal qualifications.", recommendation: "If relevant certifications exist, list them clearly in a dedicated section.", affectedSection: "education" },
-    { id: "R32", category: "skills", title: "Industry Terminology", score: keywordContextScore, status: keywordContextScore >= 70 ? "strong" : keywordContextScore >= 50 ? "good" : "needs_improvement", severity: keywordContextScore >= 70 ? "info" : "medium", summary: "The resume uses business language but may not reflect the precise domain terminology of the target role.", reasoning: "Industry terminology helps confirm fit and allows a recruiter to see alignment with the target job.", recommendation: "Use domain terms only when they are truthful and supported by the candidate’s actual experience.", affectedSection: "summary" },
-    { id: "R33", category: "skills", title: "Skill Repetition / Stuffing", score: 84, status: "good", severity: "info", summary: "The current document does not suggest unnatural keyword stuffing.", reasoning: "Keyword repetition without evidence can undermine credibility and ATS trust.", recommendation: "Keep skills relevant and evidence-backed; avoid inflated or duplicative terminology.", affectedSection: "skills" },
-    { id: "R34", category: "job_match", title: "Job Title Alignment", score: clamp(Math.max(5, roleRelevanceScore - 25)), status: roleRelevanceScore >= 70 ? "good" : roleRelevanceScore >= 50 ? "needs_improvement" : "critical", severity: roleRelevanceScore >= 70 ? "info" : "medium", summary: "The target role appears only partially aligned with the current candidate profile.", reasoning: "A role title mismatch is a major signal in job-fit analysis because it often indicates different work scope or domain.", recommendation: "Do not overstate role alignment if the target role sits in a different domain or technical stack.", affectedSection: "summary", jobRequirementId: "JD-001" },
-    { id: "R35", category: "job_match", title: "Required Skill Coverage", score: clamp(Math.max(10, skillsCoverageScore)), status: skillsCoverageScore >= 70 ? "good" : skillsCoverageScore >= 50 ? "needs_improvement" : "critical", severity: skillsCoverageScore >= 70 ? "info" : "medium", summary: "The resume covers some of the role’s core skills, but some critical areas are absent.", reasoning: "Required skill coverage is one of the clearest indicators of potential fit for the target opportunity.", recommendation: "If the candidate has genuine requirement-specific evidence, surface it in the experience or skills sections.", affectedSection: "skills", jobRequirementId: "JD-002" },
-    { id: "R36", category: "job_match", title: "Preferred Skill Coverage", score: clamp(Math.max(15, 72 - missingKeywords.length * 9)), status: missingKeywords.length <= 2 ? "good" : "needs_improvement", severity: missingKeywords.length <= 2 ? "low" : "medium", summary: "The resume reflects a few preferred requirements but not all of the value-adding skills.", reasoning: "Preferred skills can improve match quality, but they should not substitute for required expertise.", recommendation: "Add only those preferred skills that are genuinely true and supported by work history.", affectedSection: "skills" },
-    { id: "R37", category: "job_match", title: "Responsibility Alignment", score: clamp(Math.max(18, evidenceQualityScore - 12)), status: evidenceQualityScore >= 70 ? "good" : evidenceQualityScore >= 50 ? "needs_improvement" : "critical", severity: evidenceQualityScore >= 70 ? "info" : "medium", summary: "The current experience meets some responsibilities, but not the full target role scope.", reasoning: "Responsibility alignment reveals whether the candidate has been doing work similar to the target job.", recommendation: "Map the closest adjacent responsibilities into the summary or experience section only when they are factual.", affectedSection: "experience" },
-    { id: "R38", category: "job_match", title: "Qualification Alignment", score: 38, status: "needs_improvement", severity: "medium", summary: "The resume does not clearly show qualification alignment with the stricter target role requirements.", reasoning: "Qualifications such as degrees, fields of study, and credentials are non-negotiable signals in many hiring processes.", recommendation: "Do not add qualifications that are not genuinely earned; instead, state legitimate, relevant credentials clearly and accurately.", affectedSection: "education" },
-    { id: "R39", category: "job_match", title: "Experience-Level Alignment", score: clamp(seniorityFitScore), status: seniorityFitScore >= 70 ? "good" : seniorityFitScore >= 50 ? "needs_improvement" : "critical", severity: seniorityFitScore >= 70 ? "info" : "medium", summary: "The current experience appears partially aligned to the target seniority level.", reasoning: "Seniority alignment is about scope, ownership, impact, and leadership signals rather than just years of experience.", recommendation: "Ensure seniority is supported by clear ownership language and relevant examples.", affectedSection: "experience" },
-    { id: "R40", category: "job_match", title: "Domain / Industry Alignment", score: 28, status: "critical", severity: "high", summary: "The resume demonstrates business impact, but not the domain-specific experience required by the target role.", reasoning: "Domain alignment is crucial because a resume can look strong overall while still being a poor match for a specialized industry or technical domain.", recommendation: "Avoid rewriting the resume around missing domain claims. If domain experience exists, add evidence instead of broad placeholders.", affectedSection: "summary" },
-    { id: "R41", category: "job_match", title: "Missing Important Keywords", score: clamp(100 - missingKeywords.length * 12), status: missingKeywords.length === 0 ? "strong" : "needs_improvement", severity: missingKeywords.length === 0 ? "info" : "medium", summary: "Several important target-role terms are absent from the resume.", reasoning: "Missing keywords are not necessarily fatal, but when they are required, they become a clear gap in fit and ATS readability.", recommendation: "Add only the missing terms that are truthful, relevant, and supported by actual experience or project evidence.", affectedSection: "skills" },
-    { id: "R42", category: "job_match", title: "Keyword Prominence", score: clamp(keywordContextScore), status: keywordContextScore >= 70 ? "good" : keywordContextScore >= 50 ? "needs_improvement" : "critical", severity: keywordContextScore >= 70 ? "info" : "medium", summary: "Critical job terms are not yet presented with contextual depth.", reasoning: "Keyword presence alone is weak evidence. Contextual presence, in real responsibilities and results, is far stronger and more defensible.", recommendation: "Prioritize contextual evidence where role-specific terms appear in actual duties, projects, or achievements.", affectedSection: "experience" },
-    { id: "R43", category: "job_match", title: "Job Description Requirement Extraction", score: 88, status: "good", severity: "info", summary: "The target role was parsed into clear, structured requirement signals.", reasoning: "Structured requirement extraction makes analysis more reliable than raw text comparison alone.", recommendation: "Keep requirement extraction centralized so future report scoring remains deterministic and consistent.", affectedSection: "job_description" },
-    { id: "R44", category: "job_match", title: "Must-Have vs Nice-to-Have Classification", score: 80, status: "good", severity: "info", summary: "The role requirements were separated into required and preferred categories.", reasoning: "This distinction matters because a resume can be acceptable overall while still missing a must-have requirement.", recommendation: "Ensure the report prioritizes must-have gaps before preferred-language improvements.", affectedSection: "job_description" },
-    { id: "R45", category: "job_match", title: "Evidence Strength", score: clamp(evidenceQualityScore), status: evidenceQualityScore >= 70 ? "good" : evidenceQualityScore >= 50 ? "needs_improvement" : "critical", severity: evidenceQualityScore >= 70 ? "info" : "medium", summary: "The resume contains some evidence of impact, but not yet enough role-specific proof.", reasoning: "The quality of evidence matters more than the sheer volume of content.", recommendation: "Keep the strongest, most relevant evidence near the top of the experience section.", affectedSection: "experience" },
-    { id: "R46", category: "job_match", title: "Seniority Signal", score: clamp(seniorityFitScore), status: seniorityFitScore >= 70 ? "good" : seniorityFitScore >= 50 ? "needs_improvement" : "critical", severity: seniorityFitScore >= 70 ? "info" : "medium", summary: "Seniority signal is moderate but not yet fully aligned with the target job.", reasoning: "Seniority matters when a candidate is being considered for a role with a defined level of ownership and technical authority.", recommendation: "Surface ownership and leadership context when it is genuine and relevant to the target opportunity.", affectedSection: "experience" },
-    { id: "R47", category: "job_match", title: "Domain-Specific Terminology", score: clamp(keywordContextScore), status: keywordContextScore >= 70 ? "good" : keywordContextScore >= 50 ? "needs_improvement" : "critical", severity: keywordContextScore >= 70 ? "info" : "medium", summary: "The document has some relevant terminology but still lacks deeper domain specificity for the target role.", reasoning: "Terms are more useful when they are attached to genuine work context rather than used as a superficial keyword list.", recommendation: "Use the exact domain language only where the work truly matches the target role.", affectedSection: "summary" },
-    { id: "R48", category: "resume_structure", title: "Resume Summary Alignment", score: clamp(Math.max(15, 100 - criticalMissing * 12)), status: criticalMissing === 0 ? "good" : "needs_improvement", severity: criticalMissing === 0 ? "info" : "medium", summary: "The summary currently reads as a general professional profile rather than a target-role narrative.", reasoning: "A summary should help the candidate explain why they fit the target job, not just describe their background generally.", recommendation: "Tailor the summary so it reflects the target role’s critical requirements and the strongest adjacent evidence.", affectedSection: "summary" },
-    { id: "R49", category: "skills", title: "Skills Section Relevance", score: hasSkillsSection ? 75 : 54, status: hasSkillsSection ? "good" : "needs_improvement", severity: hasSkillsSection ? "info" : "medium", summary: "The skills section is present and can support job-fit interpretation.", reasoning: "Skills relevance is strongest when it mirrors the role’s required domains and tools without being inflated.", recommendation: "Keep the skills section focused and evidence-backed rather than overlong or generic.", affectedSection: "skills" },
-    { id: "R50", category: "job_match", title: "Most Relevant Experience", score: clamp(Math.max(20, 70 + (hasStrongBusinessTerms ? 8 : 0) - (criticalMissing * 10))), status: criticalMissing === 0 ? "good" : "needs_improvement", severity: criticalMissing === 0 ? "info" : "medium", summary: "The strongest experience appears to be in a different domain than the current target role.", reasoning: "The most relevant experience matters because it often anchors the candidate’s strongest case for fit.", recommendation: "Emphasize only the genuine experience that best supports the target role, while making domain gaps transparent and honest.", affectedSection: "experience" },
+  const { resumeText, sections, contact, keywords, scores, metrics, lineCount } = input;
+  const has = (section: SectionKey) => Boolean(sections[section].trim());
+  const missing = keywords.filter((item) => item.evidenceStatus === "missing");
+  const criticalMissing = missing.filter((item) => item.importance === "critical" || item.importance === "high");
+  const metricScore = metrics > 0 ? 88 : 58;
+  const contactScore = contact.email && contact.phone ? 95 : contact.email || contact.phone ? 75 : 45;
+  const rows: Array<{ id: string; category: string; title: string; score: number; summary: string; reasoning: string; recommendation: string; affectedSection: string }> = [
+    { id: "R01", category: "ats_parsing", title: "Contact Information", score: contactScore, summary: contact.email && contact.phone ? "Email and phone patterns were detected." : "Some contact information may be missing from the extracted text.", reasoning: "Contact fields were checked with simple text patterns; name and location are not reliably validated.", recommendation: "Confirm that your name, professional email, phone number, and location are easy to find.", affectedSection: "header" },
+    { id: "R02", category: "resume_structure", title: "Standard Section Headings", score: [has("summary"), has("experience"), has("skills")].filter(Boolean).length * 25 + 25, summary: "The engine checked for common summary, experience, and skills headings.", reasoning: "Heading detection is heuristic and can miss unusual heading labels or layouts.", recommendation: "Use clear, conventional section headings where appropriate.", affectedSection: "structure" },
+    { id: "R03", category: "ats_parsing", title: "Experience Section Detection", score: has("experience") ? 88 : 48, summary: has("experience") ? "A recognizable experience section was detected." : "A recognizable experience heading was not detected.", reasoning: "This checks heading-based text extraction, not the completeness of employment history.", recommendation: "Use a clear Experience or Work Experience heading and list roles consistently.", affectedSection: "experience" },
+    { id: "R04", category: "ats_parsing", title: "Date Signals", score: /\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i.test(resumeText) ? 85 : 55, summary: "Date-like patterns were checked in the extracted text.", reasoning: "Pattern detection does not verify that every role has a valid start and end date.", recommendation: "Place consistent dates beside each role, education entry, and certification where relevant.", affectedSection: "experience" },
+    { id: "R05", category: "resume_structure", title: "Resume Length", score: resumeText.length < 500 ? 55 : resumeText.length > 9000 ? 65 : 82, summary: `The extracted resume contains approximately ${resumeText.split(/\s+/).filter(Boolean).length} words.`, reasoning: "Length is estimated from extracted text; page layout and candidate seniority are not available to this check.", recommendation: "Keep the resume focused on evidence relevant to the target role.", affectedSection: "resume" },
+    { id: "R06", category: "experience_quality", title: "Quantified Achievements", score: metricScore, summary: metrics ? `${metrics} metric-like expression(s) were detected.` : "No clear metric-like expressions were detected.", reasoning: "Numbers can indicate measurable outcomes, but the engine does not verify their truth or business significance.", recommendation: "Where accurate, show scale and outcomes with percentages, revenue, time, volume, quality, or cost metrics.", affectedSection: "experience" },
+    { id: "R07", category: "experience_quality", title: "Bullet / Line Readability", score: lineCount >= 3 ? 78 : 60, summary: `${lineCount} resume lines were suitable for a basic line-level review.`, reasoning: "This is a text heuristic; it does not assess visual formatting in the original document.", recommendation: "Use concise, one-idea-per-bullet statements where that improves readability.", affectedSection: "experience" },
+    { id: "R08", category: "skills", title: "Target Requirement Coverage", score: scores.skillsCoverage, summary: `${keywords.filter((item) => item.evidenceStatus === "supported").length} extracted job terms were found in the resume.`, reasoning: "Keyword overlap is a proxy for textual alignment, not a determination of candidate competence.", recommendation: "Prioritize missing must-have requirements, and add them only when backed by genuine experience.", affectedSection: "skills" },
+    { id: "R09", category: "job_match", title: "Missing Important Keywords", score: clamp(100 - criticalMissing.length * 14 - Math.max(0, missing.length - criticalMissing.length) * 5), summary: `${missing.length} extracted job terms were not found in the resume, including ${criticalMissing.length} high-priority term(s).`, reasoning: "Absence of a phrase in the resume does not prove absence of the skill; it identifies a gap to verify.", recommendation: "Review each gap and add truthful evidence where applicable. Do not keyword-stuff or claim unearned skills.", affectedSection: "skills" },
+    { id: "R10", category: "job_match", title: "Role Relevance", score: scores.roleRelevance, summary: "Role relevance is estimated from extracted job terms and their textual overlap with the resume.", reasoning: "This deterministic estimate does not replace semantic evaluation of responsibilities, seniority, or transferable experience.", recommendation: "Prioritize the most relevant, evidence-backed experience near the top of the resume.", affectedSection: "experience" },
+    { id: "R11", category: "job_match", title: "Evidence Quality", score: scores.evidenceQuality, summary: "The score reflects detected metrics and textual evidence coverage.", reasoning: "The engine cannot verify claims or infer whether a metric is credible from text alone.", recommendation: "Tie skills and responsibilities to specific actions, scope, and verifiable outcomes.", affectedSection: "experience" },
+    { id: "R12", category: "resume_structure", title: "Summary Presence", score: has("summary") ? 85 : 55, summary: has("summary") ? "A summary/profile section was detected." : "A summary/profile heading was not detected.", reasoning: "The section check is based on recognized headings and may miss alternative formats.", recommendation: "Consider a concise, target-relevant summary if it helps clarify your fit.", affectedSection: "summary" },
+    { id: "R13", category: "resume_structure", title: "Skills Section Presence", score: has("skills") ? 85 : 55, summary: has("skills") ? "A skills/competencies section was detected." : "A skills/competencies heading was not detected.", reasoning: "Presence does not establish that listed skills are relevant or evidenced.", recommendation: "Organize relevant skills clearly and keep them consistent with your experience.", affectedSection: "skills" },
+    { id: "R14", category: "resume_structure", title: "Education Section Presence", score: has("education") ? 85 : 60, summary: has("education") ? "An education section was detected." : "An education heading was not detected.", reasoning: "The engine detects section text but does not validate degrees or institution details.", recommendation: "Include accurate education and required credentials when relevant to the role.", affectedSection: "education" },
+    { id: "R15", category: "job_match", title: "Seniority Signals", score: scores.seniorityFit, summary: "Seniority alignment is estimated from limited title and wording signals.", reasoning: "A reliable seniority assessment needs role dates, scope, decision authority, and job-level context.", recommendation: "Show ownership, complexity, leadership, and impact only where supported by actual work.", affectedSection: "experience" },
+    { id: "R16", category: "ats_parsing", title: "Extracted Text Volume", score: resumeText.length >= 500 ? 88 : 60, summary: "The extracted text length was checked as a basic readability signal.", reasoning: "Text volume alone cannot establish whether the original PDF/DOCX is ATS-compatible.", recommendation: "Review the extracted text for missing columns, broken ordering, or omitted content.", affectedSection: "resume" },
+    { id: "R17", category: "job_match", title: "Requirement Prioritization", score: criticalMissing.length === 0 ? 82 : 58, summary: "The engine assigned heuristic priority levels to extracted terms.", reasoning: "Priority labels are inferred from wording and should be checked against the employer's actual must-have criteria.", recommendation: "Verify which requirements are mandatory versus preferred before deciding whether a gap is disqualifying.", affectedSection: "job_description" },
+    { id: "R18", category: "language_quality", title: "Language Quality", score: 65, summary: "Automated grammar and spelling verification was not performed by this deterministic engine.", reasoning: "This score is deliberately conservative because no grammar/spell-check model is used here.", recommendation: "Proofread the resume or run a dedicated grammar and spelling check.", affectedSection: "language" },
+    { id: "R19", category: "experience_quality", title: "Impact Orientation", score: metricScore, summary: metrics ? "Some quantified impact signals were detected." : "Impact statements may benefit from clearer outcomes or scale.", reasoning: "The engine detects metric-like patterns, not whether bullets truly describe achievements rather than duties.", recommendation: "Where accurate, describe the action, context, and resulting outcome.", affectedSection: "experience" },
+    { id: "R20", category: "job_match", title: "Domain / Industry Alignment", score: scores.roleRelevance, summary: "Domain alignment is estimated from extracted job terms, not a fixed industry template.", reasoning: "Exact keyword matching can miss synonyms, adjacent experience, and equivalent terminology.", recommendation: "Use accurate domain terminology when it describes real experience; explain transferable skills with examples.", affectedSection: "experience" },
   ];
 
-  return checkRows.map((check) => {
-    const evidence: DiagnosticCheck["evidence"] = [
-      { source: "resume", section: check.affectedSection ?? "summary", text: check.summary ?? check.title },
-      ...(criticalMissing > 0 ? [{ source: "job_description" as const, section: "requirements", text: `Target-role requirements show ${criticalMissing} critical areas still missing from the resume.` }] : []),
-      ...(missingKeywords.length > 0 ? [{ source: "job_description" as const, section: "keywords", text: missingKeywords.slice(0, 3).map((item) => item.phrase).join(", ") }] : []),
-    ];
+  const additionalChecks: Array<[string, string, string, string]> = [
+    ["R21", "Action Language", "experience_quality", "Review whether bullets state actions and ownership clearly."],
+    ["R22", "Responsibility vs Outcome", "experience_quality", "Check whether key responsibilities are connected to outcomes where evidence exists."],
+    ["R23", "Bullet Length", "language_quality", "Review long or dense bullets for clarity and scanability."],
+    ["R24", "Repeated Wording", "language_quality", "Review repeated phrases and duplicated claims."],
+    ["R25", "Buzzword Reliance", "language_quality", "Replace unsupported claims with concrete examples where possible."],
+    ["R26", "Formatting Consistency", "resume_structure", "Manually verify consistent dates, titles, punctuation, and bullet formatting."],
+    ["R27", "Chronology", "resume_structure", "Manually verify reverse-chronological ordering and date consistency."],
+    ["R28", "Section Ordering", "resume_structure", "Review whether the most relevant sections appear early enough for the target role."],
+    ["R29", "Certification Evidence", "skills", "Only list certifications that were actually earned and are relevant."],
+    ["R30", "Tools / Technologies", "skills", "Verify tools and technologies against actual hands-on experience."],
+    ["R31", "Education Relevance", "job_match", "Compare stated education with the job's actual qualification requirements."],
+    ["R32", "Industry Terminology", "job_match", "Use role-specific terminology only when it accurately describes the candidate's work."],
+    ["R33", "Keyword Context", "job_match", "Confirm matched terms appear in meaningful context rather than as a list."],
+    ["R34", "Job Title Alignment", "job_match", "Compare actual role scope and experience with the target title."],
+    ["R35", "Required Skill Coverage", "job_match", "Review must-have skills individually and validate supporting evidence."],
+    ["R36", "Preferred Skill Coverage", "job_match", "Prioritize preferred skills only after mandatory requirements are reviewed."],
+    ["R37", "Responsibility Alignment", "job_match", "Compare the candidate's documented responsibilities with the role description."],
+    ["R38", "Qualification Alignment", "job_match", "Verify required degrees, licenses, and credentials against the resume."],
+    ["R39", "Experience-Level Alignment", "job_match", "Compare scope, ownership, and experience level; titles alone are insufficient."],
+    ["R40", "Domain / Industry Alignment", "job_match", "Assess domain fit using relevant experience and transferable evidence, not a fixed industry assumption."],
+    ["R41", "Missing Important Keywords", "job_match", "Review missing terms and distinguish missing wording from missing capability."],
+    ["R42", "Keyword Prominence", "job_match", "Place the strongest relevant evidence where a recruiter can find it quickly."],
+    ["R43", "Requirement Extraction", "job_match", "Review the extracted requirements against the original job description."],
+    ["R44", "Must-Have Classification", "job_match", "Validate which requirements are mandatory and which are preferred."],
+    ["R45", "Evidence Strength", "job_match", "Prioritize specific examples over unsupported skill claims."],
+    ["R46", "Seniority Signal", "job_match", "Support seniority claims with scope, decisions, leadership, and outcomes."],
+    ["R47", "Domain Terminology", "job_match", "Confirm domain terms match genuine work or project experience."],
+    ["R48", "Summary Alignment", "job_match", "Align the summary with the target role using truthful evidence."],
+    ["R49", "Skills Section Relevance", "skills", "Keep the skills section focused on capabilities relevant to the target role."],
+    ["R50", "Most Relevant Experience", "job_match", "Bring the strongest relevant experience forward without overstating fit."],
+  ];
+  for (const [id, title, category, recommendation] of additionalChecks) {
+    const score = id === "R30" ? scores.skillsCoverage : id === "R40" ? scores.roleRelevance : id === "R41" ? clamp(100 - missing.length * 8) : 70;
+    rows.push({
+      id, title, category, score,
+      summary: "This is a review prompt; the deterministic engine does not fully verify this criterion.",
+      reasoning: "This criterion requires contextual or visual judgment beyond simple text-pattern checks. Treat the score as a heuristic signal, not a verified finding.",
+      recommendation,
+      affectedSection: category === "skills" ? "skills" : category === "job_match" ? "experience" : "resume",
+    });
+  }
 
+  return rows.map((row) => {
+    const relatedMissing = missing.slice(0, 3).map((item) => item.phrase);
+    const evidence: DiagnosticCheck["evidence"] = [
+      { source: "resume", section: row.affectedSection, text: row.summary },
+      ...(relatedMissing.length ? [{ source: "job_description" as const, section: "requirements", text: `Terms not found in resume: ${relatedMissing.join(", ")}` }] : []),
+    ];
+    const score = clamp(row.score);
     return {
-      id: check.id,
-      title: check.title,
-      name: check.title,
-      category: check.category,
-      status: check.status,
-      severity: check.severity,
-      score: clamp(check.score),
-      maxScore: 100,
-      summary: check.summary,
-      evidence,
-      explanation: check.reasoning,
-      reasoning: check.reasoning,
-      recommendation: check.recommendation,
-      fixability: missingKeywords.length > 0 ? "strengthen" : "optional",
-      recommendedAction: check.recommendation,
-      affectedSection: check.affectedSection,
-      jobRequirementId: check.jobRequirementId ?? null,
-    };
+      id: row.id, title: row.title, name: row.title, category: row.category,
+      status: statusForScore(score), severity: score < 55 ? "high" : score < 70 ? "medium" : "info",
+      score, maxScore: 100, summary: row.summary, evidence,
+      explanation: row.reasoning, reasoning: row.reasoning, recommendation: row.recommendation,
+      fixability: criticalMissing.length ? "strengthen" : "optional",
+      recommendedAction: row.recommendation, affectedSection: row.affectedSection,
+      jobRequirementId: null,
+    } as DiagnosticCheck;
   });
 }
 
@@ -355,23 +446,17 @@ export function validateResumeAnalysisInput(input: {
   resumeText: string;
   jobDescription?: string | null;
   targetRole?: string | null;
-}): {
-  resumeText: string;
-  jobDescription: string;
-  targetRoleTitle: string;
-} {
-  const resumeText = normalizeWhitespace(input.resumeText || "");
+}): { resumeText: string; jobDescription: string; targetRoleTitle: string } {
+  // Preserve resume line boundaries so section headings and bullets remain detectable.
+  const resumeText = normalizeResumeText(input.resumeText || "");
   const jobDescription = normalizeWhitespace(input.jobDescription || "");
   const targetRoleTitle = normalizeWhitespace(input.targetRole || "Target role") || "Target role";
-
   if (!resumeText || resumeText.length < 40) {
     throw new Error("Unable to extract readable text from this resume. Please upload a text-based PDF or DOCX.");
   }
-
   if (!jobDescription || jobDescription.length < 30) {
     throw new Error("Please paste the target job description before running the analysis.");
   }
-
   return { resumeText, jobDescription, targetRoleTitle };
 }
 
@@ -389,58 +474,29 @@ export function buildResumeIntelligence(input: {
   const resumeId = input.resumeId || crypto.randomUUID();
   const createdAt = new Date().toISOString();
   const sections = getSectionBodies(resumeText);
-  const lines = bulletLinesFromResume(resumeText);
+  const lines = linesFromResume(input.resumeText);
   const contact = detectContactInfo(resumeText);
   const keywords = buildKeywordFindings(jobDescription, resumeText);
-  const requirementList = splitRequirements(jobDescription);
-  const criticalMissing = keywords.filter((item) => item.evidenceStatus === "missing" && (item.importance === "critical" || item.importance === "high")).length;
-  const partialCount = keywords.filter((item) => item.evidenceStatus === "partial").length;
+  const requirements = splitRequirements(jobDescription);
+  const missing = keywords.filter((item) => item.evidenceStatus === "missing");
+  const criticalMissing = missing.filter((item) => item.importance === "critical" || item.importance === "high");
   const metrics = computeMetricCount(resumeText);
-  const bulletEvidence = lines.filter((line) => /\d/.test(line)).slice(0, 5);
-  const summaryText = normalizeWhitespace(sections.summary) || "This resume shows strong execution and measurable growth impact, but it does not yet map convincingly to the target role.";
-
-  const roleRelevanceScore = clamp(100 - criticalMissing * 18 - partialCount * 7 + (countListMatches(resumeText, ["growth", "optimization", "analytics", "leadership", "strategy"]) > 0 ? 10 : 0), 0, 100);
-  const skillsCoverageScore = clamp(58 - criticalMissing * 16 - partialCount * 8 + (countListMatches(resumeText, ["analysis", "optimization", "strategy", "execution", "leadership"]) > 0 ? 12 : 0), 0, 100);
-  const evidenceQualityScore = clamp(70 - criticalMissing * 12 - partialCount * 8 + (metrics > 0 ? 10 : 0), 0, 100);
-  const seniorityFitScore = clamp(60 - (jobDescription.toLowerCase().includes("senior") ? 16 : 0) + (resumeText.toLowerCase().includes("lead") ? 12 : 0), 0, 100);
-  const atsScore = clamp((contact.email && contact.phone ? 92 : 75) - (resumeText.length < 300 ? 12 : 0) + (sections.summary && sections.skills ? 8 : 0), 0, 100);
-  const keywordContextScore = clamp(100 - criticalMissing * 18 - partialCount * 6, 0, 100);
-  const clarityScore = clamp(82 + (bulletEvidence.length > 0 ? 8 : 0) - (resumeText.length > 4000 ? 10 : 0), 0, 100);
-
-  const overallScore = Math.round(
-    (roleRelevanceScore * 0.25 +
-      skillsCoverageScore * 0.2 +
-      evidenceQualityScore * 0.2 +
-      seniorityFitScore * 0.1 +
-      atsScore * 0.1 +
-      keywordContextScore * 0.1 +
-      clarityScore * 0.05),
-  );
-
-  const resumeQualityScore = Math.round(
-    (atsScore * 0.15) +
-      (82 * 0.15) +
-      (Math.min(100, evidenceQualityScore + 15) * 0.25) +
-      (Math.min(100, (skillsCoverageScore + clarityScore) / 2) * 0.2) +
-      (Math.min(100, skillsCoverageScore * 0.15 + clarityScore * 0.1) * 0.15) +
-      (Math.min(100, clarityScore * 0.1 + atsScore * 0.05) * 0.1),
-  );
-
-  const jobMatchScore = Math.round(
-    (roleRelevanceScore * 0.25) +
-      (skillsCoverageScore * 0.2) +
-      (evidenceQualityScore * 0.15) +
-      (seniorityFitScore * 0.1) +
-      (keywordContextScore * 0.15) +
-      (Math.min(100, (roleRelevanceScore + skillsCoverageScore) / 2) * 0.15),
-  );
-
-  const applicationReadinessScore = Math.round((resumeQualityScore * 0.55) + (jobMatchScore * 0.45));
-
+  const termCoverage = keywords.length ? keywords.filter((item) => item.evidenceStatus === "supported").length / keywords.length : 0;
+  const metricScore = metrics > 0 ? Math.min(95, 70 + metrics * 3) : 48;
+  const atsScore = clamp((contact.email ? 30 : 10) + (contact.phone ? 25 : 10) + (sections.summary ? 10 : 0) + (sections.experience ? 15 : 0) + (sections.skills ? 10 : 0) + (resumeText.length > 500 ? 10 : 0));
+  const roleRelevanceScore = clamp(35 + termCoverage * 65 - Math.min(25, criticalMissing.length * 5));
+  const skillsCoverageScore = clamp(30 + termCoverage * 70);
+  const evidenceQualityScore = clamp(45 + Math.min(metrics * 4, 25) + (sections.experience ? 10 : 0) + (lines.length >= 4 ? 10 : 0));
+  const seniorityFitScore = clamp(55 + (/\b(senior|lead|principal|director|head of|manager)\b/i.test(resumeText) ? 15 : 0) - (/\b(senior|lead|principal|director|head of)\b/i.test(jobDescription) && !/\b(senior|lead|principal|director|head of|manager)\b/i.test(resumeText) ? 15 : 0));
+  const keywordContextScore = clamp(25 + termCoverage * 75);
+  const clarityScore = clamp(70 + (lines.length >= 4 ? 10 : 0) - (resumeText.length > 8000 ? 10 : 0));
+  const resumeQualityScore = Math.round(atsScore * 0.3 + evidenceQualityScore * 0.3 + clarityScore * 0.2 + (sections.summary && sections.experience && sections.skills ? 20 : 10));
+  const jobMatchScore = Math.round(roleRelevanceScore * 0.35 + skillsCoverageScore * 0.3 + evidenceQualityScore * 0.15 + seniorityFitScore * 0.1 + keywordContextScore * 0.1);
+  const applicationReadinessScore = Math.round(resumeQualityScore * 0.45 + jobMatchScore * 0.55);
   const scores: AnalysisScores = {
     overall: applicationReadinessScore,
-    resumeQuality: resumeQualityScore,
-    jobMatch: jobMatchScore,
+    resumeQuality: clamp(resumeQualityScore),
+    jobMatch: clamp(jobMatchScore),
     applicationReadiness: applicationReadinessScore,
     roleRelevance: Math.round(roleRelevanceScore),
     skillsCoverage: Math.round(skillsCoverageScore),
@@ -451,200 +507,210 @@ export function buildResumeIntelligence(input: {
     clarityBrevity: Math.round(clarityScore),
   };
 
-  const directEvidence = bulletEvidence.length > 0 ? bulletEvidence : ["Strong measurable business outcomes are present in the resume."];
-  const strongFinding = createFinding(
-    "Strong growth execution",
-    "The resume demonstrates measurable growth, acquisition, and optimization outcomes that show operational impact.",
-    directEvidence,
-  );
+  const roleMismatch = assessRoleMismatch(resumeText, jobDescription, targetRoleTitle);
+  if (roleMismatch.mismatch) {
+    // Do not let general resume quality hide a fundamental mismatch with the target role.
+    scores.roleRelevance = Math.min(scores.roleRelevance, 10);
+    scores.jobMatch = Math.min(scores.jobMatch, 10);
+    scores.overall = Math.min(scores.overall, 25);
+    scores.applicationReadiness = Math.min(scores.applicationReadiness, 25);
+  }
 
-  const requirementStrengths = keywords
-    .filter((item) => item.evidenceStatus === "supported")
-    .slice(0, 3)
-    .map((item) => createFinding(item.phrase, item.explanation, [item.phrase]));
+  const supported = keywords.filter((item) => item.evidenceStatus === "supported");
+  const directEvidence = lines.filter((line) => /\d/.test(line)).slice(0, 4);
+  const strengths: Finding[] = [];
+  if (directEvidence.length) strengths.push(createFinding("Quantified evidence", "The resume includes numeric or metric-like details that may help demonstrate scope or outcomes.", directEvidence));
+  if (sections.experience) strengths.push(createFinding("Experience section detected", "A recognizable experience section was detected in the extracted resume text.", [sections.experience.slice(0, 180)]));
+  if (supported.length) strengths.push(createFinding("Job-term overlap", "Some terms from the target job description also appear in the resume. Review context to confirm they reflect genuine experience.", supported.slice(0, 4).map((item) => item.phrase)));
+  if (sections.education) strengths.push(createFinding("Education section detected", "Education-related content was found in the extracted text.", [sections.education.slice(0, 180)]));
+  if (!strengths.length) strengths.push(createFinding("Resume text extracted", "Readable resume text was available for comparison, but the heuristic checks found limited strong signals.", [resumeText.slice(0, 180)]));
 
-  const blockerList: Blocker[] = keywords
-    .filter((item) => item.evidenceStatus === "missing" && item.importance !== "low")
-    .slice(0, 5)
-    .map((item, index) => ({
-      id: `blocker-${index + 1}`,
-      severity: item.importance === "critical" ? "critical" : item.importance === "high" ? "high" : "medium",
-      requirement: item.phrase,
-      evidenceStatus: "missing",
-      fixability: item.fixability,
-      explanation: item.explanation,
-    }));
+  const blockers: Blocker[] = criticalMissing.slice(0, 8).map((item, index) => ({
+    id: `blocker-${index + 1}`,
+    severity: item.importance === "critical" ? "critical" : "high",
+    requirement: item.phrase,
+    evidenceStatus: "missing",
+    fixability: item.fixability,
+    explanation: item.explanation,
+  })) as Blocker[];
 
-  const strengths: Finding[] = [
-    strongFinding,
-    ...requirementStrengths,
-    createFinding(
-      "Analytical operating rhythm",
-      "The resume reflects a data-informed optimization mindset that supports analytical problem solving in a business context.",
-      ["Funnel optimization", "growth experiments", "performance measurement"],
-    ),
-  ].slice(0, 5);
+  if (roleMismatch.mismatch) {
+    roleMismatch.reasons.forEach((reason, index) => {
+      blockers.push({
+        id: `role-mismatch-${index + 1}`,
+        severity: "critical",
+        requirement: index === 0 ? "Major occupation mismatch" : "Mandatory qualification mismatch",
+        evidenceStatus: "missing",
+        fixability: "not_fixable_by_wording",
+        explanation: reason,
+      } as Blocker);
+    });
+  }
 
-  const evidenceMap: EvidenceMapEntry[] = requirementList.slice(0, 7).map((requirement, index) => {
-    const normalizedRequirement = requirement.toLowerCase();
-    const matched = keywords.find((item) => normalizedRequirement.includes(item.phrase) || item.phrase.includes(normalizedRequirement));
-    const keywordEvidence = matched ? [matched.phrase] : [];
-    const baseEvidence = matched && matched.evidenceStatus === "supported"
-      ? ["The resume contains direct role overlap for this requirement."]
-      : matched && matched.evidenceStatus === "partial"
-        ? ["The resume shows transferable evidence but not direct qualification."]
-        : ["No clear evidence for this requirement appeared in the supplied resume."];
-
+  const evidenceMap: EvidenceMapEntry[] = requirements.slice(0, 12).map((requirement, index) => {
+    const normalized = normalizeToken(requirement);
+    const matched = keywords.find((item) => countTermOccurrences(requirement, item.phrase) > 0 || countTermOccurrences(item.phrase, normalized) > 0);
+    const status = matched?.evidenceStatus ?? "missing";
     return {
       requirementId: `req-${index + 1}`,
       requirement,
       category: matched?.category ?? "other",
       importance: matched?.importance ?? "medium",
-      evidenceStatus: matched?.evidenceStatus ?? "missing",
-      resumeEvidence: keywordEvidence.length > 0 ? keywordEvidence : baseEvidence,
+      evidenceStatus: status,
+      resumeEvidence: matched && matched.evidenceStatus !== "missing" ? [matched.phrase] : [],
       evidenceStrength: matched?.evidenceStrength ?? "none",
-      fixability: matched?.fixability ?? "not_fixable_by_wording",
-      explanation: matched
-        ? matched.explanation
-        : "No direct evidence for this requirement was found in the submitted resume.",
-      recommendedAction: matched?.fixability === "strengthen" ? "Strengthen the evidence by making the relevant experience more specific and role-aligned." : undefined,
-    };
+      fixability: matched?.fixability ?? "strengthen",
+      explanation: matched?.explanation ?? "No extracted keyword could be confidently matched to this requirement. Manual review is needed.",
+      recommendedAction: status === "missing" ? "Check whether you have relevant experience; if so, add a truthful, specific example." : "Make the related experience and outcome clear in the relevant resume section.",
+    } as EvidenceMapEntry;
   });
 
-  const recommendations: Recommendation[] = [
-    {
-      priority: 1,
-      title: "Address the fundamental RF domain gap",
-      problem: "The target role requires RF engineering and antenna experience, but the supplied resume does not provide direct evidence for that domain.",
-      whyItMatters: "This is the highest-risk mismatch because it affects the candidate's ability to qualify for the role without a direct technical foundation.",
-      evidence: keywords.filter((item) => item.evidenceStatus === "missing" && item.importance === "critical").slice(0, 3).map((item) => item.phrase),
-      action: "Do not add RF claims without evidence. If the candidate has genuine RF work, bring it forward explicitly; otherwise treat this as a role mismatch.",
+  const recommendations: Recommendation[] = [];
+  if (criticalMissing.length) recommendations.push({
+    priority: 1,
+    title: "Review high-priority requirement gaps",
+    problem: `${criticalMissing.length} high-priority job-description term(s) were not found in the resume text.`,
+    whyItMatters: "Missing terms may reduce visible alignment, but they do not prove the candidate lacks the underlying experience.",
+    evidence: criticalMissing.slice(0, 5).map((item) => item.phrase),
+    action: "Verify each gap against actual experience. Add truthful evidence where it exists; do not claim skills, tools, or qualifications you do not have.",
+    fixability: "strengthen",
+  } as Recommendation);
+  if (!sections.experience || metrics === 0) recommendations.push({
+    priority: recommendations.length + 1,
+    title: "Make experience evidence more specific",
+    problem: !sections.experience ? "A standard experience heading was not detected." : "No clear metric-like outcomes were detected.",
+    whyItMatters: "Specific examples help recruiters assess scope, ownership, and results.",
+    evidence: !sections.experience ? [] : ["No metric-like expressions detected by the heuristic scan"],
+    action: !sections.experience ? "Use a clear experience heading and organize roles with employer, title, dates, and concise bullets." : "Where accurate, add scale, outcome, time saved, revenue, volume, quality, or cost impact to relevant bullets.",
+    fixability: "strengthen",
+  } as Recommendation);
+  if (!sections.skills) recommendations.push({
+    priority: recommendations.length + 1,
+    title: "Clarify relevant skills",
+    problem: "A standard skills heading was not detected.",
+    whyItMatters: "A focused skills section makes relevant capabilities easier to scan and compare with the job description.",
+    evidence: [],
+    action: "Add a concise skills section containing only skills you can substantiate with work, project, or education evidence.",
+    fixability: "strengthen",
+  } as Recommendation);
+  if (!recommendations.length) recommendations.push({
+    priority: 1,
+    title: "Validate keyword matches in context",
+    problem: "The resume contains several terms that overlap with the job description, but exact phrase matching cannot verify depth.",
+    whyItMatters: "Evidence in accomplishments and responsibilities is more meaningful than keyword presence alone.",
+    evidence: supported.slice(0, 5).map((item) => item.phrase),
+    action: "Review the strongest matching bullets and make ownership, context, and outcomes explicit without adding unsupported claims.",
+    fixability: "strengthen",
+  } as Recommendation);
+
+  if (roleMismatch.mismatch) {
+    recommendations.unshift({
+      priority: 0,
+      title: "Confirm role eligibility before applying",
+      problem: "The target role appears to require a different occupational background or mandatory qualification.",
+      whyItMatters: roleMismatch.reasons.join(" "),
+      evidence: roleMismatch.reasons,
+      action: "Verify the target role and mandatory requirements. Do not attempt to solve a fundamental qualification or occupation mismatch by adding keywords.",
       fixability: "not_fixable_by_wording",
-    },
-    {
-      priority: 2,
-      title: "Clarify the target-fit narrative",
-      problem: "The resume demonstrates strong growth outcomes but lacks role-specific proof for the target engineering function.",
-      whyItMatters: "The current narrative is credible for marketing growth, but it hides the mismatch between the applicant's actual experience and the job requirement.",
-      evidence: ["Strong measurable growth outcomes", "Target RF engineering gap"],
-      action: "Reframe the profile around transferable analytical capability, then clearly explain the gap and the relevant adjacent experience if applicable.",
-      fixability: "strengthen",
-    },
-    {
-      priority: 3,
-      title: "Increase evidence of problem solving and systems thinking",
-      problem: "The resume suggests analytical and optimization skills, but they are not tied to technical systems or engineering work.",
-      whyItMatters: "This is an improvable area that can help bridge non-direct experience to adjacent technical roles if supported by concrete examples.",
-      evidence: ["Optimization work", "Performance measurement", "Analytical decision-making"],
-      action: "Add clear examples of problem solving, experimentation, and systems impact with quantified outcomes.",
-      fixability: "strengthen",
-    },
-  ];
+    } as Recommendation);
+  }
 
-  const diagnostics: DiagnosticCheck[] = buildStructuredChecks({
-    resumeText,
-    jobDescription,
-    targetRoleTitle,
-    sections,
-    contact,
-    keywords,
-    summaryText,
-    roleRelevanceScore,
-    skillsCoverageScore,
-    evidenceQualityScore,
-    seniorityFitScore,
-    atsScore,
-    keywordContextScore,
-    clarityScore,
-    overallScore,
+  const diagnostics = buildStructuredChecks({ resumeText, sections, contact, keywords, scores, metrics, lineCount: lines.length });
+  if (roleMismatch.mismatch) {
+    diagnostics.unshift({
+      id: "ROLE-MISMATCH",
+      title: "Major occupation mismatch",
+      name: "Major occupation mismatch",
+      category: "job_match",
+      status: "needs_improvement",
+      severity: "high",
+      score: 0,
+      maxScore: 100,
+      summary: "The resume's occupational profile does not align with the target role.",
+      evidence: [
+        { source: "resume", section: "profile", text: roleMismatch.resumeRole ?? "Resume profile indicates a different occupation." },
+        { source: "job_description", section: "target_role", text: roleMismatch.targetRole ?? "Target role appears to be in a different occupational family." },
+      ],
+      explanation: roleMismatch.reasons.join(" "),
+      reasoning: roleMismatch.reasons.join(" "),
+      recommendation: "Before tailoring this resume, confirm that this is the intended job. Consider roles aligned with your existing occupation and qualifications.",
+      recommendedAction: "Confirm the target role or choose a role aligned with your experience.",
+      affectedSection: "target_role",
+      fixability: "not_fixable_by_wording",
+      jobRequirementId: null,
+    } as DiagnosticCheck);
+  }
+  const sectionFeedback: SectionFeedback[] = ([
+    ["Summary", "summary"],
+    ["Experience", "experience"],
+    ["Education", "education"],
+    ["Skills", "skills"],
+  ] as Array<[string, SectionKey]>).map(([label, key]) => {
+    const present = Boolean(sections[key].trim());
+    const score = present ? key === "experience" && metrics > 0 ? 86 : 76 : 48;
+    return {
+      section: label,
+      score,
+      strengths: present ? [createFinding(`${label} detected`, `Content was found under a recognizable ${label.toLowerCase()} heading.`, [sections[key].slice(0, 180)])] : [],
+      issues: present ? [] : [createFinding(`${label} not detected`, `A standard ${label.toLowerCase()} heading was not detected in the extracted text.`, [])],
+      suggestions: [createFinding(`Review ${label.toLowerCase()} relevance`, "Check that this section is accurate, concise, and relevant to the target role.", requirements.slice(0, 2))],
+    } as SectionFeedback;
   });
 
-  const sectionFeedback: SectionFeedback[] = [
-    {
-      section: "Summary",
-      score: clamp(46),
-      strengths: [createFinding("Career positioning", "The summary is readable and consistent with a growth-focused background.", [summaryText])],
-      issues: [createFinding("Role mismatch", "The summary does not directly address the target RF engineering domain.", ["RF engineering", "antenna design"])],
-      suggestions: [createFinding("Tighten the narrative", "Reframe the summary around measurable business impact and the closest adjacent technical competence.", ["problem solving", "systems thinking"])],
-    },
-    {
-      section: "Experience",
-      score: clamp(76),
-      strengths: [createFinding("Result-driven execution", "The experience section includes strong quantified outcomes and clear operational scope.", bulletEvidence)],
-      issues: [createFinding("Technical mismatch", "The experience does not show direct RF engineering or antenna qualification.", ["RF engineering", "base station antennas"])],
-      suggestions: [createFinding("Add relevant evidence", "If there is adjacent technical work, surface it with measurable examples and a clear connection to the target role.", ["technical ownership", "systems work"])],
-    },
-    {
-      section: "Education",
-      score: clamp(38),
-      strengths: [createFinding("Clear academic baseline", "The resume presents a structured education record, though not yet aligned to the target domain.", ["Education section detected"])],
-      issues: [createFinding("Qualification gap", "No direct electrical engineering or required degree alignment was found in the submission.", ["electrical engineering"])],
-      suggestions: [createFinding("Surface the right credentials", "If the degree or coursework is relevant, make it explicit and connected to the role's technical requirements.", ["degree", "engineering coursework"])],
-    },
-    {
-      section: "Skills",
-      score: clamp(51),
-      strengths: [createFinding("General analytical capability", "Skill language reflects data-informed operational work.", ["optimization", "analysis", "execution"])],
-      issues: [createFinding("Critical skill gap", "Specific RF and simulation tools are absent from the skills narrative.", ["HFSS", "CST", "ADS"])],
-      suggestions: [createFinding("Build a precise technical skills profile", "Only keep highly relevant tools and methods if they are genuinely true and supported by experience.", ["technical tools", "domain evidence"])],
-    },
-  ];
-
-  const lineFindings: ResumeLineFinding[] = lines.slice(0, 5).map((line, index) => {
-    const isStrong = /\d/.test(line) || /(growth|optimization|performance|leadership|program)/i.test(line);
+  const lineFindings: ResumeLineFinding[] = lines.slice(0, 8).map((line, index) => {
+    const hasMetric = /\d|%|\$|₹/.test(line);
     return {
-      section: index % 2 === 0 ? "experience" : "summary",
+      section: sections.experience && sections.experience.includes(line) ? "experience" : sections.skills && sections.skills.includes(line) ? "skills" : sections.education && sections.education.includes(line) ? "education" : "other",
       itemId: `line-${index + 1}`,
       originalText: line,
-      checks: isStrong ? ["14 quantified_achievements", "15 outcome_orientation"] : ["19 bullet_readability"],
-      severity: isStrong ? "good" : "review",
-      explanation: isStrong
-        ? "This bullet contains a measurable result or clear business outcome, which is useful evidence for the application."
-        : "This bullet reads clearly but would benefit from more concrete or role-specific evidence.",
-      suggestedApproach: isStrong ? "Keep the outcome and quantify it if possible." : "Add a specific metric, owned scope, or role-aligned technical signal.",
-    };
+      checks: hasMetric ? ["quantified_evidence"] : ["specificity_review"],
+      severity: hasMetric ? "good" : "review",
+      explanation: hasMetric ? "This line contains a numeric signal. Confirm it accurately represents the result and context." : "This line has no obvious numeric signal; that is not inherently a problem, but a concrete example may improve it.",
+      suggestedApproach: hasMetric ? "Retain the metric if it is accurate and clarify the action and result where needed." : "Where useful and truthful, add scope, ownership, or outcome detail.",
+    } as ResumeLineFinding;
   });
 
-  const detectedLocation = jobDescription.match(/[A-Za-z]+,\s*[A-Za-z]+/g)?.[0] ?? null;
-  const detectedWorkModel = /remote|hybrid|onsite/i.test(jobDescription)
-    ? (jobDescription.toLowerCase().includes("remote") ? "remote" : jobDescription.toLowerCase().includes("hybrid") ? "hybrid" : "onsite")
-    : null;
+  const locationMatch = jobDescription.match(/\b(?:in|based in|located in)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z][A-Za-z .'-]+)\b/);
+  const workModel = /\bremote\b/i.test(jobDescription) ? "remote" : /\bhybrid\b/i.test(jobDescription) ? "hybrid" : /\b(on[- ]site|onsite)\b/i.test(jobDescription) ? "onsite" : null;
+  const roleText = targetRoleTitle === "Target role"
+    ? (roleMismatch.targetRole ?? targetRoleTitle)
+    : targetRoleTitle;
+  const summaryText = sections.summary || "No dedicated summary section was detected. The assessment below is based on the extracted resume text and target job description.";
+  const executiveHeadline = roleMismatch.mismatch
+    ? "Major role mismatch detected — review eligibility before applying"
+    : criticalMissing.length
+      ? `Review ${criticalMissing.length} high-priority requirement gap${criticalMissing.length === 1 ? "" : "s"}`
+      : `Resume and job-description comparison completed`;
 
   return {
     id: crypto.randomUUID(),
     userId,
     resumeId,
     createdAt,
-    source: {
-      resumeFileName: resumeFileName,
-      resumeText,
-      jobDescription,
-    },
+    source: { resumeFileName, resumeText, jobDescription },
     targetRole: {
-      title: targetRoleTitle,
-      seniority: jobDescription.toLowerCase().includes("senior") ? "senior" : "mid-level",
-      location: detectedLocation,
-      relocationRequired: /relocation/i.test(jobDescription),
-      workModel: detectedWorkModel,
+      title: roleText,
+      seniority: /\b(principal|director|head of|senior|lead)\b/i.test(jobDescription) ? "senior" : "mid-level",
+      location: locationMatch?.[1]?.trim() ?? null,
+      relocationRequired: /\brelocation required|must relocate|relocation assistance\b/i.test(jobDescription),
+      workModel,
     },
     executiveAssessment: {
-      headline: "Strong business execution with a major RF-role gap",
+      headline: executiveHeadline,
       summary: summaryText,
-      bottomLine: `The resume shows credible business performance and operational impact, but it does not yet provide enough direct evidence for the target RF engineering role to be considered application-ready.`,
+      bottomLine: roleMismatch.mismatch
+        ? `Potentially unsuitable for this role based on the supplied documents. ${roleMismatch.reasons.join(" ")} This is an evidence-based warning, not a final employer eligibility decision.`
+        : `This is a heuristic comparison of the supplied resume and job description. ${missing.length} extracted job term(s) were not found in the resume text. Treat these as items to verify, not proof that the candidate lacks those capabilities.`,
     },
     scores,
     diagnostic: diagnostics,
-    strengths,
-    blockers: blockerList,
+    strengths: strengths.slice(0, 5),
+    blockers,
     keywords,
     evidenceMap,
     recommendations,
     sectionFeedback,
     lineFindings,
-    metadata: {
-      parserVersion: parserVersion,
-      analysisVersion: analysisVersion,
-      model: "deterministic-resume-intelligence",
-    },
-  };
+    metadata: { parserVersion, analysisVersion, model: "deterministic-resume-intelligence" },
+  } as ResumeAnalysis;
 }
